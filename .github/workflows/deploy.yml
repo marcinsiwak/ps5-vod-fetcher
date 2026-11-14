@@ -1,0 +1,55 @@
+name: Build & deploy to Raspberry Pi
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Never run two deploys at once
+concurrency:
+  group: deploy-pi
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Build
+        run: ./gradlew installDist --no-daemon
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ps5-vod-fetcher
+          path: build/install/ps5-vod-fetcher
+          retention-days: 7
+
+  deploy:
+    needs: build
+    # The GitHub runner installed on your Pi (see README → Deploy)
+    runs-on: [self-hosted, linux, ARM64]
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: ps5-vod-fetcher
+          path: new-build
+
+      - name: Install & restart
+        run: |
+          APP_DIR="$HOME/ps5-vod-fetcher"
+          chmod +x new-build/bin/*            # artifacts lose the exec bit
+          rm -rf "$APP_DIR.new"
+          cp -r new-build "$APP_DIR.new"
+          rm -rf "$APP_DIR.old"
+          [ -d "$APP_DIR" ] && mv "$APP_DIR" "$APP_DIR.old"
+          mv "$APP_DIR.new" "$APP_DIR"
+          sudo systemctl restart vod-fetcher
+          sleep 5
+          systemctl is-active vod-fetcher

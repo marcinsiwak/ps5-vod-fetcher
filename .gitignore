@@ -1,0 +1,13 @@
+.gradle/
+build/
+.idea/
+*.iml
+.kotlin/
+local.properties
+
+# secrets & runtime data
+*.env
+!*.env.example
+cookies.txt
+processed.txt
+vods/

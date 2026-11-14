@@ -1,0 +1,16 @@
+[Unit]
+Description=PS5 YouTube VOD fetcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Change "pi" to your username if different
+User=pi
+EnvironmentFile=/home/pi/vod.env
+Environment=PATH=/home/pi/.deno/bin:/home/pi/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/pi/ps5-vod-fetcher/bin/ps5-vod-fetcher
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
