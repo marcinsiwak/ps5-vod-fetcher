@@ -1,0 +1,12 @@
+.git
+.github
+.gradle
+.idea
+.kotlin
+build
+deploy
+vods
+*.env
+cookies.txt
+processed.txt
+README.md

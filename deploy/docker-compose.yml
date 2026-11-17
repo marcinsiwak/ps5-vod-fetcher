@@ -1,0 +1,13 @@
+services:
+  vod-fetcher:
+    image: ${DOCKER_IMAGE:-YOUR_DOCKERHUB_USER/ps5-vod-fetcher}:latest
+    container_name: vod-fetcher
+    restart: unless-stopped
+    env_file: vod.env
+    environment:
+      DOWNLOAD_DIR: /data/vods
+      STATE_FILE: /data/processed.txt
+    volumes:
+      - ${VODS_DIR:-/mnt/ssd/vods}:/data/vods
+      - ./state:/data
+      # - ./cookies.txt:/data/cookies.txt:ro   # only for Private broadcasts (set YT_COOKIES_FILE=/data/cookies.txt)

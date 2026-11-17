@@ -43,36 +43,40 @@ export LOOKBACK_HOURS=24              # optional: ignore older streams on first 
 ./gradlew run
 ```
 
+### …or with Docker
+```bash
+docker build -t ps5-vod-fetcher .
+docker run --rm --env-file vod.env -v "$PWD/vods:/data/vods" -v "$PWD/state:/data" ps5-vod-fetcher
+```
+The image bundles the JRE, `yt-dlp` (+ `yt-dlp-ejs`), Deno and `ffmpeg`. Inside the container, videos go to `/data/vods` and the state file to `/data/processed.txt`.
+
 ## 4. Raspberry Pi setup (one-time)
 Use Raspberry Pi OS **64-bit** and save videos to a USB SSD/HDD rather than the SD card.
 
 ```bash
-sudo apt update
-sudo apt install -y openjdk-17-jre-headless ffmpeg pipx
-pipx install yt-dlp && pipx inject yt-dlp yt-dlp-ejs
-curl -fsSL https://deno.land/install.sh | sh      # yt-dlp needs a JS runtime for YouTube
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER        # log out & back in afterwards
 
-# secrets
-cp deploy/vod.env.example ~/vod.env && nano ~/vod.env
-
-# service
-sudo cp deploy/vod-fetcher.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable vod-fetcher
-
-# let the deploy job restart the service without a password
-echo "$USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart vod-fetcher" | sudo tee /etc/sudoers.d/vod-fetcher
+mkdir -p ~/vod-fetcher && cd ~/vod-fetcher
+# copy deploy/vod.env.example here as vod.env and fill in the secrets
+nano vod.env
 ```
-If your username isn't `pi`, update the paths in `vod-fetcher.service`.
+The deploy job copies `deploy/docker-compose.yml` into `~/vod-fetcher` and starts the container. Videos go to `/mnt/ssd/vods` by default; to change that, add `VODS_DIR=/your/path` to a `.env` file next to the compose file. State (`processed.txt`) is kept in `~/vod-fetcher/state`.
 
-## 5. Auto-deploy with GitHub Actions
-Every push to `main` triggers `.github/workflows/deploy.yml`:
-1. **build** runs on GitHub's servers and runs `./gradlew installDist`.
-2. **deploy** runs **on your Pi** through a self-hosted runner. It downloads the build into `~/ps5-vod-fetcher` and restarts the service.
+## 5. Push to Docker Hub & deploy
+Build the image on your PC and push it to Docker Hub as `<user>/ps5-vod-fetcher:latest` and `:<commit-sha>`. The image is multi-arch (`linux/amd64` + `linux/arm64`), so it runs on both your PC and the Pi.
+```powershell
+docker login
+./push.ps1 -User <dockerhub-user>            # or set $env:DOCKERHUB_USERNAME
+./push.ps1 -User <dockerhub-user> -Deploy    # also make the Pi pull & restart (needs the gh CLI)
+```
+`-Deploy` triggers `.github/workflows/deploy.yml`, which runs **on your Pi** through a self-hosted runner and does `docker compose pull && docker compose up -d`. You can also start it from the Actions tab (Run workflow), entering the image name. Without the runner, run the same two compose commands on the Pi yourself, with `DOCKER_IMAGE=<user>/ps5-vod-fetcher` in `~/vod-fetcher/.env`.
+
+If you want the image private, create the `ps5-vod-fetcher` repo on Docker Hub as private first, then run `docker login` on the Pi.
 
 The runner on the Pi connects *out* to GitHub, so you don't need port forwarding or SSH exposed to the internet.
 
-**Install the runner on the Pi:** in your repo, go to **Settings → Actions → Runners → New self-hosted runner → Linux / ARM64** and run the commands shown there. Then install it as a service:
+**Install the runner on the Pi:** in your repo, go to **Settings → Actions → Runners → New self-hosted runner → Linux / ARM64** and run the commands shown there. Then install it as a service (the runner user must be in the `docker` group):
 ```bash
 cd ~/actions-runner
 sudo ./svc.sh install $USER
@@ -85,5 +89,5 @@ sudo ./svc.sh start
 - **Quota:** each poll costs about 1 unit out of the default 10,000/day, so polling every 5 minutes uses about 288/day.
 - **Retries:** YouTube needs some time to process a VOD after the stream ends. Failed downloads are retried on the next poll and only marked as done in `processed.txt` once they succeed.
 - **Quality:** the VOD is limited to what the PS5 broadcast at (Settings → Captures and Broadcasts → Broadcasts → Video quality).
-- yt-dlp breaks now and then when YouTube changes something. Keep it updated with a weekly cron job running `pipx upgrade yt-dlp`.
-- Logs: `journalctl -u vod-fetcher -f`
+- yt-dlp breaks now and then when YouTube changes something. Each `./push.ps1` installs the latest version into the image, so re-run it (with `-Deploy`) when downloads start failing.
+- Logs: `docker logs -f vod-fetcher`
