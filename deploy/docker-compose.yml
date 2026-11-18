@@ -6,8 +6,10 @@ services:
     env_file: vod.env
     environment:
       DOWNLOAD_DIR: /data/vods
+      CLIPS_DIR: /data/clips
       STATE_FILE: /data/processed.txt
     volumes:
       - ${VODS_DIR:-/mnt/ssd/vods}:/data/vods
+      - ${CLIPS_DIR:-/mnt/ssd/clips}:/data/clips
       - ./state:/data
       # - ./cookies.txt:/data/cookies.txt:ro   # only for Private broadcasts (set YT_COOKIES_FILE=/data/cookies.txt)

@@ -85,6 +85,36 @@ sudo ./svc.sh start
 
 ⚠️ **Keep the repo private.** On a public repo, anyone could open a PR that runs code on your Pi.
 
+## 6. AI shorts (TikTok / Reels / YouTube Shorts)
+When `ANTHROPIC_API_KEY` is set, every downloaded VOD is cut into vertical 1080×1920 clips of the best moments: gameplay highlights, stunts, funny moments and unexpected events.
+
+How it works (`src/main/kotlin/Clipper.kt`):
+1. **Audio scan:** ffmpeg measures loudness every second, and spikes (explosions, crashes, shouting) are passed to Claude as hints.
+2. **Contact sheets:** one keyframe every `CLIP_FRAME_INTERVAL` seconds (default 4), tiled 3×3, so each image covers 36 s of footage. Only keyframes are decoded, so this is fast on a Pi.
+3. **Claude** (`claude-haiku-5-5` by default, or `CLIP_MODEL=claude-opus-5-5` for sharper picks) reviews about 12 minutes of sheets per request and returns clip candidates as structured JSON: start/end, category, score from 1 to 10, title, caption and hashtags.
+4. The best non-overlapping clips scoring 5 or more (up to `MAX_CLIPS`) are rendered with ffmpeg. `CLIP_STYLE=blur` keeps the whole 16:9 frame on a blurred background; `crop` does a center crop.
+
+Output goes to `CLIPS_DIR/<vod name>/` (on the Pi: `/mnt/ssd/clips`, which you can change with `CLIPS_DIR=` in `.env`):
+```
+01_stunt_insane-barrel-roll-landing.mp4
+02_funny-ragdoll-off-the-cliff.mp4
+clips.json      # timestamps, scores, captions, hashtags
+captions.md     # ready to copy-paste when posting
+```
+If the API has a temporary problem (rate limit, outage), nothing is written and the VOD is retried on the next poll. This applies to VODs downloaded within the last `LOOKBACK_HOURS`.
+
+**No credit, a bad key, or no key at all:** a tiny test request (about 10 tokens) runs before any heavy work. If it fails for one of these reasons, the folder gets a `CUT_MANUALLY.txt` that says why and how to fix it, and the log shows a `⚠ NO SHORTS` line. That VOD isn't retried automatically, so you can cut it yourself (CapCut, DaVinci Resolve, or YouTube Studio → "Create Short"), or fix the problem and then run the `clip` command below, or delete the note.
+
+**Run it by hand** on any video:
+```bash
+docker run --rm --env-file vod.env -v "$PWD/vods:/data/vods" -v "$PWD/clips:/data/clips" \
+  ps5-vod-fetcher clip /data/vods/<file>.mp4
+```
+
+**API key:** go to platform.claude.com, then **Settings → API keys → Create key**, and add credits under **Billing**.
+**Cost:** each sheet is about 1,500 input tokens, so a 1-hour VOD (100 sheets, 5 requests) is roughly 160K tokens: about **$0.02 per hour of stream** on Haiku 5.5, or about $0.65 on Opus 5.5. A lower `CLIP_FRAME_INTERVAL` gives finer detection but costs proportionally more.
+**Pi speed:** rendering a clip takes about real time to 2× real time on a Pi 5 (`libx264 veryfast`), so 8 clips take a few minutes.
+
 ## Notes
 - **Quota:** each poll costs about 1 unit out of the default 10,000/day, so polling every 5 minutes uses about 288/day.
 - **Retries:** YouTube needs some time to process a VOD after the stream ends. Failed downloads are retried on the next poll and only marked as done in `processed.txt` once they succeed.

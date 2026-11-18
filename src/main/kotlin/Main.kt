@@ -103,12 +103,43 @@ fun runPostCmd(cfg: Config, file: File) {
 
 fun log(msg: String) = println("[${Instant.now()}] $msg")
 
+// ---------- Clipping ----------
+/** Clip every recent VOD that has no clips.json yet — new downloads plus earlier failures (retried each poll). */
+fun clipPending(cfg: Config, clipper: Clipper?) {
+    val cutoff = System.currentTimeMillis() - cfg.lookbackHours * 3_600_000
+    val vods = cfg.downloadDir.listFiles { f -> f.extension == "mp4" && f.lastModified() > cutoff } ?: return
+    for (vod in vods.sortedBy { it.lastModified() }) {
+        if (clipper == null) { // no key configured: just tell the user once per VOD
+            if (!clipFolder(vod).exists()) writeManualNote(
+                vod, "AI clipping is not set up (ANTHROPIC_API_KEY is empty).",
+                "Create a key at https://platform.claude.com → Settings → API keys, put it in ANTHROPIC_API_KEY in vod.env and restart",
+            )
+            continue
+        }
+        try {
+            clipper.process(vod)
+        } catch (e: Exception) {
+            log("Clipper failed for ${vod.name}, will retry next poll: ${e.message}")
+        }
+    }
+}
+
 // ---------- Main loop ----------
-fun main() {
+fun main(args: Array<String>) {
+    // Manual mode: ps5-vod-fetcher clip <video.mp4> [more.mp4 ...]
+    if (args.firstOrNull() == "clip") {
+        val clipper = Clipper(ClipConfig.fromEnv() ?: error("Set ANTHROPIC_API_KEY to use clip"))
+        args.drop(1).forEach { clipper.process(File(it), force = true) }
+        return
+    }
+
     val cfg = Config()
     val yt = YouTube(cfg)
+    val clipper = ClipConfig.fromEnv()?.let { Clipper(it) }
     val processed = cfg.stateFile.takeIf { it.exists() }?.readLines()?.toMutableSet() ?: mutableSetOf()
     log("Started. Polling every ${cfg.pollSeconds}s, saving to ${cfg.downloadDir.absolutePath}")
+    log(if (clipper != null) "Auto-clipping ON (shorts → ${ClipConfig.fromEnv()!!.outDir.absolutePath})"
+        else "Auto-clipping OFF (set ANTHROPIC_API_KEY to enable)")
 
     while (true) {
         try {
@@ -133,6 +164,7 @@ fun main() {
         } catch (e: Exception) {
             log("Error: ${e.message}")
         }
+        clipPending(cfg, clipper)
         Thread.sleep(cfg.pollSeconds * 1000)
     }
 }

@@ -24,6 +24,7 @@ ENV PATH="/opt/yt-dlp/bin:${PATH}"
 COPY --from=build /src/build/install/ps5-vod-fetcher /app
 
 ENV DOWNLOAD_DIR=/data/vods \
+    CLIPS_DIR=/data/clips \
     STATE_FILE=/data/processed.txt
 VOLUME /data
 
