@@ -21,6 +21,13 @@ RUN python3 -m venv /opt/yt-dlp \
  && /opt/yt-dlp/bin/pip install --no-cache-dir -U "yt-dlp[default]"
 ENV PATH="/opt/yt-dlp/bin:${PATH}"
 
+# Claude Code CLI for AI clipping (uses your Claude subscription via CLAUDE_CODE_OAUTH_TOKEN, no API key)
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/* \
+ && curl -fsSL https://claude.ai/install.sh | bash \
+ && cp -L /root/.local/bin/claude /usr/local/bin/claude && rm -rf /root/.local/share/claude \
+ && claude --version
+ENV DISABLE_AUTOUPDATER=1
+
 COPY --from=build /src/build/install/ps5-vod-fetcher /app
 
 ENV DOWNLOAD_DIR=/data/vods \

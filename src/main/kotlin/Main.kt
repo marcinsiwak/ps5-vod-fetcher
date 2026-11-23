@@ -109,10 +109,10 @@ fun clipPending(cfg: Config, clipper: Clipper?) {
     val cutoff = System.currentTimeMillis() - cfg.lookbackHours * 3_600_000
     val vods = cfg.downloadDir.listFiles { f -> f.extension == "mp4" && f.lastModified() > cutoff } ?: return
     for (vod in vods.sortedBy { it.lastModified() }) {
-        if (clipper == null) { // no key configured: just tell the user once per VOD
+        if (clipper == null) { // no Claude CLI: just tell the user once per VOD
             if (!clipFolder(vod).exists()) writeManualNote(
-                vod, "AI clipping is not set up (ANTHROPIC_API_KEY is empty).",
-                "Create a key at https://platform.claude.com → Settings → API keys, put it in ANTHROPIC_API_KEY in vod.env and restart",
+                vod, "AI clipping is off (the Claude Code CLI is not installed, or CLIP_ENABLED=false).",
+                "Install Claude Code (https://claude.com/claude-code), log in (or set CLAUDE_CODE_OAUTH_TOKEN) and restart",
             )
             continue
         }
@@ -139,7 +139,7 @@ fun main(args: Array<String>) {
 fun command(args: Array<String>) {
     // Manual mode: ps5-vod-fetcher clip <video.mp4> [more.mp4 ...]
     if (args.firstOrNull() == "clip") {
-        val clipper = Clipper(ClipConfig.fromEnv() ?: error("Set ANTHROPIC_API_KEY to use clip"))
+        val clipper = Clipper(ClipConfig.fromEnv() ?: error("The Claude Code CLI (claude) is not installed, or CLIP_ENABLED=false"))
         args.drop(1).forEach { clipper.process(File(it), newRun = true) }
         return
     }
@@ -169,7 +169,7 @@ fun service() {
     val processed = cfg.stateFile.takeIf { it.exists() }?.readLines()?.toMutableSet() ?: mutableSetOf()
     log("Started. Polling every ${cfg.pollSeconds}s, saving to ${cfg.downloadDir.absolutePath}")
     log(if (clipper != null) "Auto-clipping ON (shorts → ${ClipConfig.fromEnv()!!.outDir.absolutePath})"
-        else "Auto-clipping OFF (set ANTHROPIC_API_KEY to enable)")
+        else "Auto-clipping OFF (Claude Code CLI not installed, or CLIP_ENABLED=false)")
     val ig = Instagram.fromEnv()
     log(if (ig != null) "Instagram posting ON: folders with an $APPROVED_MARKER file get posted"
         else "Instagram posting OFF (set IG_ACCESS_TOKEN to enable)")

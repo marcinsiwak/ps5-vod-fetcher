@@ -1,18 +1,14 @@
-import com.anthropic.client.AnthropicClient
-import com.anthropic.client.okhttp.AnthropicOkHttpClient
-import com.anthropic.core.JsonValue
-import com.anthropic.errors.AnthropicServiceException
-import com.anthropic.models.messages.Base64ImageSource
-import com.anthropic.models.messages.ContentBlockParam
-import com.anthropic.models.messages.ImageBlockParam
-import com.anthropic.models.messages.MessageCreateParams
-import com.anthropic.models.messages.StopReason
-import com.anthropic.models.messages.TextBlockParam
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
-import java.util.Base64
+import java.util.concurrent.TimeUnit
 import kotlin.math.max
 import kotlin.math.min
 
@@ -26,23 +22,34 @@ fun nextFreeFolder(base: File): File = generateSequence(1) { it + 1 }
     .first { !File(it, "clips.json").exists() && !File(it, MANUAL_NOTE).exists() }
 
 data class ClipConfig(
-    val apiKey: String,
     val outDir: File = clipsDir(),
-    // Haiku: ~$0.02 per hour of stream. claude-opus-5-5 is sharper at "funny" moments but ~40x the price.
-    val model: String = System.getenv("CLIP_MODEL") ?: "claude-haiku-5-5",
+    // Claude Code CLI model alias or full name: haiku (default, lightest on your plan's usage limits), sonnet, opus
+    val model: String = System.getenv("CLIP_MODEL") ?: "haiku",
     val maxClips: Int = System.getenv("MAX_CLIPS")?.toInt() ?: 8,
     // "blur" = whole 16:9 frame centred on a blurred fill (keeps HUD/context), "crop" = centre crop to 9:16
     val style: String = System.getenv("CLIP_STYLE") ?: "blur",
-    // seconds between sampled frames; lower = finer detection, more tokens
+    // seconds between sampled frames; lower = finer detection, more usage
     val frameInterval: Int = System.getenv("CLIP_FRAME_INTERVAL")?.toInt() ?: 4,
+    // the Claude Code CLI binary
+    val claudeBin: String = System.getenv("CLAUDE_BIN") ?: "claude",
 ) {
     companion object {
-        fun fromEnv(): ClipConfig? = System.getenv("ANTHROPIC_API_KEY")?.takeIf { it.isNotBlank() }?.let { ClipConfig(it) }
+        /** On when the `claude` CLI is installed (and CLIP_ENABLED isn't false). Login is checked per VOD (preflight). */
+        fun fromEnv(): ClipConfig? {
+            if (System.getenv("CLIP_ENABLED")?.lowercase() == "false") return null
+            return ClipConfig().takeIf { claudeInstalled(it.claudeBin) }
+        }
+
+        private fun claudeInstalled(bin: String) = try {
+            ProcessBuilder(bin, "--version").redirectErrorStream(true).start().run {
+                inputStream.readAllBytes(); waitFor(30, TimeUnit.SECONDS) && exitValue() == 0
+            }
+        } catch (e: Exception) { false }
     }
 }
 
 // ---------- Structured output schema (Claude fills this in) ----------
-@JvmRecord data class ClipIdea(
+@Serializable data class ClipIdea(
     val startSec: Long,
     val endSec: Long,
     /** gameplay | stunt | funny | unexpected */
@@ -54,7 +61,20 @@ data class ClipConfig(
     val hashtags: List<String>,
     val reason: String,
 )
-@JvmRecord data class ClipIdeas(val clips: List<ClipIdea>)
+@Serializable data class ClipIdeas(val clips: List<ClipIdea>)
+
+/** JSON Schema for `claude --json-schema`; the CLI returns a matching object in `structured_output`. */
+private val CLIP_SCHEMA = """
+{"type":"object","additionalProperties":false,"required":["clips"],"properties":{"clips":{"type":"array","items":{
+"type":"object","additionalProperties":false,
+"required":["startSec","endSec","category","score","title","caption","hashtags","reason"],
+"properties":{
+"startSec":{"type":"integer"},"endSec":{"type":"integer"},
+"category":{"type":"string","enum":["gameplay","stunt","funny","unexpected"]},
+"score":{"type":"integer","minimum":1,"maximum":10},
+"title":{"type":"string"},"caption":{"type":"string"},
+"hashtags":{"type":"array","items":{"type":"string"}},"reason":{"type":"string"}}}}}}
+""".trimIndent().replace("\n", "")
 
 // What we write next to the rendered clips
 @Serializable data class ClipOut(
@@ -63,7 +83,7 @@ data class ClipConfig(
 )
 
 private const val TILE = 3                 // 3x3 contact sheet
-private const val SHEETS_PER_REQUEST = 20  // 20 sheets x 9 frames x 4s = 12 min of video per Claude call
+private const val SHEETS_PER_REQUEST = 20  // 20 sheets x 9 frames x 4s = 12 min of video per Claude CLI run
 private const val MIN_LEN = 10L
 private const val MAX_LEN = 90L
 
@@ -71,8 +91,9 @@ private val SYSTEM_PROMPT = """
 You are a short-form video editor cutting a PlayStation 5 gameplay stream (a YouTube VOD) into
 TikTok / Instagram Reels / YouTube Shorts clips.
 
-You get contact sheets: each image is a 3x3 grid of frames sampled at a fixed interval, read
-left-to-right, top-to-bottom; the text before each image gives each cell's timestamp. You also get
+You get contact sheets: JPG files in the current directory, each a 3x3 grid of frames sampled at a
+fixed interval, read left-to-right, top-to-bottom; the prompt lists each file and its cells' timestamps.
+Open every listed sheet with the Read tool before answering (read several at once). You also get
 the loudest audio moments (a spike usually means an explosion, crash, scream, laugh or hype moment).
 
 Find the moments worth posting:
@@ -93,15 +114,12 @@ Rules:
 """.trimIndent()
 
 class Clipper(private val cfg: ClipConfig) {
-    private val claude: AnthropicClient = AnthropicOkHttpClient.builder()
-        .apiKey(cfg.apiKey)
-        .maxRetries(4)
-        .build()
+    private val json = Json { ignoreUnknownKeys = true }
     private val prettyJson = Json { prettyPrint = true }
 
     /**
      * Analyse [video] and render the best moments as vertical clips. Returns the output folder.
-     * If the API can't be used (no credit / bad key) a CUT_MANUALLY.txt note is left instead and the VOD
+     * If Claude can't be used (CLI not logged in) a CUT_MANUALLY.txt note is left instead and the VOD
      * is not retried automatically.
      * [newRun] (the manual `clip` command) never skips and never overwrites: if the VOD was clipped before,
      * this run goes to the next free folder (name_2, name_3, …) so earlier clips are kept.
@@ -198,60 +216,38 @@ class Clipper(private val cfg: ClipConfig) {
         return work.listFiles { f -> f.name.startsWith("sheet_") }!!.sortedBy { it.name }
     }
 
-    // ---------- 3. ask Claude ----------
+    // ---------- 3. ask Claude (Claude Code CLI on your subscription, no API key) ----------
     private fun askClaude(sheets: List<File>, firstSheet: Int, loud: DoubleArray, duration: Double): List<ClipIdea> {
         val perSheet = (TILE * TILE * cfg.frameInterval).toLong()
         val from = firstSheet * perSheet
         val to = min(duration.toLong(), (firstSheet + sheets.size) * perSheet)
 
-        val content = mutableListOf<ContentBlockParam>()
         val peakText = peaks(loud, from, to).joinToString("\n") { (s, d) -> "- ${s}s (${fmt(s)}): +%.0f dB".format(d) }
-        content += text(
-            "Section ${fmt(from)}–${fmt(to)} of a ${fmt(duration.toLong())} video (${from}s–${to}s).\n" +
-                "Loudest audio moments (dB above the stream's median):\n" + peakText.ifEmpty { "- none stand out" },
-        )
-        sheets.forEachIndexed { i, sheet ->
-            val base = (firstSheet + i) * perSheet
-            val times = (0 until TILE * TILE).map { base + it * cfg.frameInterval }
-            content += text("Sheet ${firstSheet + i + 1}, cells at: " + times.joinToString(", ") { "${it}s" })
-            content += ContentBlockParam.ofImage(
-                ImageBlockParam.builder().source(
-                    Base64ImageSource.builder()
-                        .mediaType(Base64ImageSource.MediaType.IMAGE_JPEG)
-                        .data(Base64.getEncoder().encodeToString(sheet.readBytes()))
-                        .build(),
-                ).build(),
-            )
-        }
-        content += text("List the clip-worthy moments in this section.")
-
-        val params = MessageCreateParams.builder()
-            .model(cfg.model)
-            .maxTokens(16000L)
-            .system(SYSTEM_PROMPT)
-            .outputConfig(ClipIdeas::class.java) // typed JSON; effort stays at the model default (medium)
-            .addUserMessageOfContentBlockParams(content)
-            .apply {
-                // Opus/Sonnet/Fable: if a safety classifier declines, retry on a fallback model (Haiku has none)
-                if (!cfg.model.startsWith("claude-haiku")) {
-                    putAdditionalHeader("anthropic-beta", "server-side-fallback-2026-07-01")
-                    putAdditionalBodyProperty("fallbacks", JsonValue.from("default"))
-                }
+        val prompt = buildString {
+            append("Section ${fmt(from)}–${fmt(to)} of a ${fmt(duration.toLong())} video (${from}s–${to}s).\n")
+            append("Loudest audio moments (dB above the stream's median):\n${peakText.ifEmpty { "- none stand out" }}\n\n")
+            append("Contact sheets (read every one):\n")
+            sheets.forEachIndexed { i, sheet ->
+                val base = (firstSheet + i) * perSheet
+                val times = (0 until TILE * TILE).map { base + it * cfg.frameInterval }
+                append("- ${sheet.name} (sheet ${firstSheet + i + 1}), cells at: ${times.joinToString(", ") { "${it}s" }}\n")
             }
-            .build()
+            append("\nList the clip-worthy moments in this section.")
+        }
 
-        // Other API errors propagate: process() then writes nothing and the VOD is retried on the next poll
-        val msg = callClaude("section ${fmt(from)}–${fmt(to)}") { claude.messages().create(params) }
-        when (msg.stopReason().orElse(null)) {
-            StopReason.REFUSAL -> { log("Clipper: Claude declined section ${fmt(from)}–${fmt(to)}, skipping"); return emptyList() }
-            StopReason.MAX_TOKENS -> { log("Clipper: response cut off for section ${fmt(from)}–${fmt(to)}, skipping"); return emptyList() }
-            else -> {}
+        // Other errors propagate: process() then writes nothing and the VOD is retried on the next poll
+        val res = callClaude(
+            "section ${fmt(from)}–${fmt(to)}", sheets.first().parentFile, prompt,
+            "--tools", "Read", "--allowedTools", "Read", "--json-schema", CLIP_SCHEMA, "--system-prompt", SYSTEM_PROMPT,
+        )
+        val structured = res["structured_output"] as? JsonObject
+        if (structured == null) {
+            log("Clipper: no structured answer for section ${fmt(from)}–${fmt(to)}, skipping " +
+                "(${res["result"]?.jsonPrimitive?.contentOrNull?.take(200)})")
+            return emptyList()
         }
-        val ideas: List<ClipIdea> = msg.content().flatMap { block ->
-            block.text().map { t -> t.text().clips }.orElse(emptyList())
-        }
-        log("Clipper: section ${fmt(from)}–${fmt(to)} → ${ideas.size} candidates " +
-            "(${msg.usage().inputTokens()} in / ${msg.usage().outputTokens()} out tokens)")
+        val ideas = json.decodeFromJsonElement<ClipIdeas>(structured).clips
+        log("Clipper: section ${fmt(from)}–${fmt(to)} → ${ideas.size} candidates")
         return ideas
     }
 
@@ -289,43 +285,58 @@ class Clipper(private val cfg: ClipConfig) {
         return ok
     }
 
-    // ---------- API access checks ----------
-    /** ~10-token request: tells us about missing credit / bad key before minutes of ffmpeg work. */
-    private fun preflight() = callClaude("preflight") {
-        claude.messages().create(
-            MessageCreateParams.builder().model(cfg.model).maxTokens(1L).addUserMessage("ping").build(),
-        )
+    // ---------- Claude Code CLI ----------
+    /** Tiny request: tells us the CLI isn't logged in before minutes of ffmpeg work. */
+    private fun preflight() {
+        callClaude("preflight", cfg.outDir.apply { mkdirs() }, "Reply with just: ok", "--tools", "", "--model", "haiku")
     }
 
-    private fun <T> callClaude(what: String, block: () -> T): T = try {
-        block()
-    } catch (e: AnthropicServiceException) {
-        val msg = e.message.orEmpty()
-        when {
-            e.statusCode() == 402 || msg.contains("credit balance", ignoreCase = true) -> throw ClipBlocked(
-                "Your Anthropic account has no API credit left.",
-                "Add credit at https://platform.claude.com → Settings → Billing",
+    /**
+     * Runs `claude -p` headless in [dir] (prompt on stdin) and returns the CLI's JSON result object.
+     * ANTHROPIC_API_KEY is removed from its environment so the CLI uses your Claude subscription:
+     * your `claude` login on a PC, or CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) in Docker / on the Pi.
+     */
+    private fun callClaude(what: String, dir: File, prompt: String, vararg extra: String): JsonObject {
+        // a --model in [extra] overrides this one (last flag wins)
+        val cmd = listOf(cfg.claudeBin, "-p", "--output-format", "json", "--model", cfg.model, "--no-session-persistence") + extra
+        val pb = ProcessBuilder(cmd).directory(dir).redirectError(ProcessBuilder.Redirect.INHERIT)
+        pb.environment().remove("ANTHROPIC_API_KEY")
+        val p = try { pb.start() } catch (e: Exception) {
+            throw ClipBlocked(
+                "The Claude Code CLI ('${cfg.claudeBin}') could not be started.",
+                "Install Claude Code (https://claude.com/claude-code) or set CLAUDE_BIN to its path",
             )
-            e.statusCode() == 401 || e.statusCode() == 403 -> throw ClipBlocked(
-                "The Anthropic API key was rejected (${e.statusCode()}).",
-                "Put a valid key in ANTHROPIC_API_KEY in vod.env (https://platform.claude.com → Settings → API keys) and restart",
-            )
-            else -> throw IllegalStateException("Claude API error (${e.statusCode()}) during $what: $msg", e)
         }
+        p.outputStream.bufferedWriter().use { it.write(prompt) }
+        val out = p.inputStream.bufferedReader().readText()
+        if (!p.waitFor(20, TimeUnit.MINUTES)) { p.destroyForcibly(); error("claude timed out during $what") }
+
+        val res = out.trim().lines().lastOrNull()?.let { runCatching { json.parseToJsonElement(it).jsonObject }.getOrNull() }
+        val isError = res?.get("is_error")?.jsonPrimitive?.booleanOrNull ?: true
+        if (res != null && !isError && p.exitValue() == 0) return res
+
+        val msg = res?.get("result")?.jsonPrimitive?.contentOrNull ?: out.take(500).ifBlank { "exit code ${p.exitValue()}" }
+        if (Regex("not logged in|/login|invalid api key|authenticat|oauth|\\b401\\b", RegexOption.IGNORE_CASE).containsMatchIn(msg)) {
+            throw ClipBlocked(
+                "The Claude Code CLI is not logged in ($msg).",
+                "Run `claude setup-token` on any PC, put the token in CLAUDE_CODE_OAUTH_TOKEN in vod.env and restart " +
+                    "(or just run `claude` once and log in, when clipping on your own PC)",
+            )
+        }
+        // usage limit reached / outage: transient, the VOD is retried on the next poll
+        throw IllegalStateException("Claude CLI error during $what: $msg")
     }
 
     // ---------- helpers ----------
     private fun probeDuration(video: File): Double =
         runCapture("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", video.path)
             .firstOrNull()?.trim()?.toDoubleOrNull() ?: error("ffprobe could not read ${video.name}")
-
-    private fun text(s: String) = ContentBlockParam.ofText(TextBlockParam.builder().text(s).build())
 }
 
 // ---------- "cut it yourself" fallback ----------
 const val MANUAL_NOTE = "CUT_MANUALLY.txt"
 
-/** The AI can't run until the user fixes something (credit / key) — not worth retrying every poll. */
+/** The AI can't run until the user fixes something (CLI missing / not logged in) — not worth retrying every poll. */
 class ClipBlocked(reason: String, val fix: String) : Exception(reason)
 
 /** Leave a note next to where the clips would be, and shout in the log. */
