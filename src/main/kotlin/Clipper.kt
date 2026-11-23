@@ -154,8 +154,8 @@ class Clipper(private val cfg: ClipConfig) {
                 val firstSheet = i * SHEETS_PER_REQUEST
                 askClaude(chunk, firstSheet, loudness, duration)
             }
-            val picked = pick(ideas, duration)
-            log("Clipper: ${ideas.size} candidates → rendering ${picked.size}")
+            val (picked, extra) = pick(ideas, duration)
+            log("Clipper: ${ideas.size} candidates → rendering ${picked.size}, ${extra.size} more worth checking")
 
             val out = picked.mapIndexedNotNull { n, c ->
                 val name = "%02d_%s_%s.mp4".format(n + 1, c.category, slug(c.title))
@@ -168,7 +168,9 @@ class Clipper(private val cfg: ClipConfig) {
                 "## ${it.file}\n**${it.title}** (${it.category}, ${it.score}/10, ${fmt(it.startSec)}–${fmt(it.endSec)})\n\n" +
                     "${it.caption}\n\n${it.hashtags.joinToString(" ") { h -> "#$h" }}"
             } + "\n")
-            log("Clipper: saved ${out.size} clips to ${outDir.path}")
+            writeWorthChecking(File(outDir, WORTH_CHECKING), video, extra)
+            log("Clipper: saved ${out.size} clips to ${outDir.path}" +
+                if (extra.isNotEmpty()) " (+${extra.size} more moments listed in $WORTH_CHECKING)" else "")
             return outDir
         } catch (e: ClipBlocked) { // e.g. credit ran out mid-VOD
             writeManualNote(video, e.message!!, e.fix, outDir)
@@ -252,16 +254,35 @@ class Clipper(private val cfg: ClipConfig) {
     }
 
     // ---------- 4. pick best non-overlapping ----------
-    private fun pick(ideas: List<ClipIdea>, duration: Double): List<ClipIdea> {
-        val chosen = mutableListOf<ClipIdea>()
+    /**
+     * Best non-overlapping clips scoring 5+: the top [ClipConfig.maxClips] get rendered, the rest
+     * (worth posting but over the limit) are returned second, for the "worth checking" list.
+     */
+    private fun pick(ideas: List<ClipIdea>, duration: Double): Pair<List<ClipIdea>, List<ClipIdea>> {
+        val good = mutableListOf<ClipIdea>()
         for (raw in ideas.sortedByDescending { it.score }) {
-            if (chosen.size >= cfg.maxClips || raw.score < 5) break
+            if (raw.score < 5) break
             val start = raw.startSec.coerceIn(0, max(0, duration.toLong() - MIN_LEN))
             val end = raw.endSec.coerceIn(start + MIN_LEN, min(start + MAX_LEN, duration.toLong()))
             val c = raw.copy(startSec = start, endSec = end)
-            if (chosen.none { it.startSec < c.endSec && c.startSec < it.endSec }) chosen += c
+            if (good.none { it.startSec < c.endSec && c.startSec < it.endSec }) good += c
         }
-        return chosen.sortedBy { it.startSec }
+        return good.take(cfg.maxClips).sortedBy { it.startSec } to good.drop(cfg.maxClips).sortedBy { it.startSec }
+    }
+
+    /** Moments Claude rated worth posting that didn't make the MAX_CLIPS cut, with time ranges to cut by hand. */
+    private fun writeWorthChecking(file: File, video: File, extra: List<ClipIdea>) {
+        if (extra.isEmpty()) { file.delete(); return }
+        file.writeText(buildString {
+            append("# More moments worth checking — ${video.name}\n\n")
+            append("Claude rated these worth a short too, but they didn't fit in MAX_CLIPS=${cfg.maxClips}.\n")
+            append("Cut them yourself, or re-run with a higher limit: `clip --max N <video>`.\n\n")
+            append("| Time range | Length | Score | Category | Title | What happens |\n|---|---|---|---|---|---|\n")
+            extra.forEach {
+                append("| ${fmt(it.startSec)}–${fmt(it.endSec)} | ${it.endSec - it.startSec}s | ${it.score}/10 | ${it.category} " +
+                    "| ${it.title.replace("|", "/")} | ${it.reason.replace("|", "/")} |\n")
+            }
+        })
     }
 
     // ---------- 5. render vertical 1080x1920 ----------
@@ -335,6 +356,7 @@ class Clipper(private val cfg: ClipConfig) {
 
 // ---------- "cut it yourself" fallback ----------
 const val MANUAL_NOTE = "CUT_MANUALLY.txt"
+const val WORTH_CHECKING = "worth_checking.md"
 
 /** The AI can't run until the user fixes something (CLI missing / not logged in) — not worth retrying every poll. */
 class ClipBlocked(reason: String, val fix: String) : Exception(reason)

@@ -137,10 +137,19 @@ fun main(args: Array<String>) {
 }
 
 fun command(args: Array<String>) {
-    // Manual mode: ps5-vod-fetcher clip <video.mp4> [more.mp4 ...]
+    // Manual mode: ps5-vod-fetcher clip [--max N] <video.mp4> [more.mp4 ...]
     if (args.firstOrNull() == "clip") {
-        val clipper = Clipper(ClipConfig.fromEnv() ?: error("The Claude Code CLI (claude) is not installed, or CLIP_ENABLED=false"))
-        args.drop(1).forEach { clipper.process(File(it), newRun = true) }
+        var cfg = ClipConfig.fromEnv() ?: error("The Claude Code CLI (claude) is not installed, or CLIP_ENABLED=false")
+        val rest = args.drop(1).toMutableList()
+        val i = rest.indexOf("--max")
+        if (i >= 0) {
+            val n = rest.getOrNull(i + 1)?.toIntOrNull()?.takeIf { it > 0 } ?: error("--max needs a number, e.g. --max 5")
+            cfg = cfg.copy(maxClips = n)
+            rest.subList(i, i + 2).clear()
+        }
+        if (rest.isEmpty()) error("Usage: clip [--max N] <video.mp4> [more.mp4 ...]")
+        val clipper = Clipper(cfg)
+        rest.forEach { clipper.process(File(it), newRun = true) }
         return
     }
     // Manual mode: ps5-vod-fetcher post <clips folder> [more folders ...]  (posts what's left after your review)
@@ -158,7 +167,7 @@ fun command(args: Array<String>) {
         log("Instagram token OK: @$username (account id $id)")
         return
     }
-    error("Unknown command '${args.first()}'. Use: clip <video...> | post <clips folder...> | ig-check")
+    error("Unknown command '${args.first()}'. Use: clip [--max N] <video...> | post <clips folder...> | ig-check")
 }
 
 // ---------- Service: poll YouTube, download, clip, post approved ----------

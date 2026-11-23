@@ -100,7 +100,9 @@ Output goes to `CLIPS_DIR/<vod name>/` (on the Pi: `/mnt/ssd/clips`, which you c
 02_funny-ragdoll-off-the-cliff.mp4
 clips.json      # timestamps, scores, captions, hashtags
 captions.md     # ready to copy-paste when posting
+worth_checking.md  # more moments rated worth a short that didn't fit in MAX_CLIPS: time ranges to check/cut yourself
 ```
+`MAX_CLIPS` (default 8) is how many clips get rendered. The `clip` command also takes `--max N`.
 If Claude has a temporary problem (usage limit reached, outage), nothing is written and the VOD is retried on the next poll. This applies to VODs downloaded within the last `LOOKBACK_HOURS`.
 
 **CLI not logged in or not installed:** a tiny test request runs before any heavy work. If it fails for one of these reasons, the folder gets a `CUT_MANUALLY.txt` that says why and how to fix it, and the log shows a `⚠ NO SHORTS` line. That VOD isn't retried automatically, so you can cut it yourself (CapCut, DaVinci Resolve, or YouTube Studio → "Create Short"), or fix the problem and then run the `clip` command below, or delete the note.
@@ -116,7 +118,7 @@ Running it again on the same video never overwrites anything. Each run saves to 
 **Run it by hand** on the Pi or in Docker:
 ```bash
 docker run --rm --env-file vod.env -v "$PWD/vods:/data/vods" -v "$PWD/clips:/data/clips" \
-  ps5-vod-fetcher clip /data/vods/<file>.mp4
+  ps5-vod-fetcher clip --max 5 /data/vods/<file>.mp4
 ```
 
 **Login (no API key):** the clipper calls the `claude` CLI that is built into the Docker image, and `ANTHROPIC_API_KEY` is never passed to it, so it always uses your Claude Pro/Max subscription. Run `claude setup-token` once on any PC, then put the token in `CLAUDE_CODE_OAUTH_TOKEN=` in `vod.env` (on the Pi too). If you run the app outside Docker, logging in with `claude` once is enough. Set `CLIP_ENABLED=false` to turn clipping off.
