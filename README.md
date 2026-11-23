@@ -105,7 +105,15 @@ If the API has a temporary problem (rate limit, outage), nothing is written and 
 
 **No credit, a bad key, or no key at all:** a tiny test request (about 10 tokens) runs before any heavy work. If it fails for one of these reasons, the folder gets a `CUT_MANUALLY.txt` that says why and how to fix it, and the log shows a `⚠ NO SHORTS` line. That VOD isn't retried automatically, so you can cut it yourself (CapCut, DaVinci Resolve, or YouTube Studio → "Create Short"), or fix the problem and then run the `clip` command below, or delete the note.
 
-**Run it by hand** on any video:
+**Your own video file** (Windows, local Docker):
+```powershell
+./clip.ps1 "vods\my gameplay.mp4"                    # → clips\my gameplay\
+./clip.ps1 "vods\my gameplay.mp4" -Style crop        # → clips\my gameplay_2\  (earlier clips are kept)
+```
+Options: `-Style blur|crop`, `-MaxClips N`, `-Model claude-opus-5-5`, `-FrameInterval N`, `-Out <folder>`, `-Build` (rebuild the image after code changes).
+Running it again on the same video never overwrites anything. Each run saves to the next free folder (`_2`, `_3`, …), so you can compare settings.
+
+**Run it by hand** on the Pi or in Docker:
 ```bash
 docker run --rm --env-file vod.env -v "$PWD/vods:/data/vods" -v "$PWD/clips:/data/clips" \
   ps5-vod-fetcher clip /data/vods/<file>.mp4
@@ -114,6 +122,51 @@ docker run --rm --env-file vod.env -v "$PWD/vods:/data/vods" -v "$PWD/clips:/dat
 **API key:** go to platform.claude.com, then **Settings → API keys → Create key**, and add credits under **Billing**.
 **Cost:** each sheet is about 1,500 input tokens, so a 1-hour VOD (100 sheets, 5 requests) is roughly 160K tokens: about **$0.02 per hour of stream** on Haiku 5.5, or about $0.65 on Opus 5.5. A lower `CLIP_FRAME_INTERVAL` gives finer detection but costs proportionally more.
 **Pi speed:** rendering a clip takes about real time to 2× real time on a Pi 5 (`libx264 veryfast`), so 8 clips take a few minutes.
+
+## 7. Highlight clips (no AI)
+`highlights.ps1` finds the best moments in a VOD and cuts them into 16:9 clips. It runs yt-dlp + ffmpeg inside the Docker image, so you don't need them installed locally.
+```powershell
+./highlights.ps1 https://youtu.be/VIDEO_ID --list          # show candidate moments only
+./highlights.ps1 https://youtu.be/VIDEO_ID                 # cut the top 8 x 30 s clips
+./highlights.ps1 https://youtu.be/VIDEO_ID --pick 1,3      # cut only those (analysis is cached)
+./highlights.ps1 https://youtu.be/VIDEO_ID --manual "1:23:10-1:23:45" --top 5 --length 45 --min-score 2
+./highlights.ps1 .\vods\stream.mp4                   # local files work too
+```
+Each second of the VOD gets a score from several signals combined:
+- **Audio:** loudness, and sudden loudness jumps relative to the previous ~30 s
+- **Video:** motion, scene-cut density, and brightness flashes
+- **YouTube (when available):** the *Most replayed* heatmap, live-chat activity from the stream replay, and timestamps viewers wrote in comments
+
+For YouTube VODs, analysis uses a 360p copy that is deleted afterwards. Clips are then downloaded in full quality, fetching only their sections.
+
+Output goes to `clips/<video-id>/`: the clips, plus `highlights.json` listing why each moment was picked.
+
+## 8. Instagram Reels posting (after you review)
+Nothing is posted automatically. Clips wait in their folder until you approve them.
+
+**Review → post:**
+1. Open `clips\<vod>\`, watch the clips, and **delete the `.mp4`s you don't want**. You can also edit `title` / `caption` / `hashtags` in `clips.json`. The Instagram caption is title + caption + hashtags.
+2. Post what's left:
+   - **PC:** `./post.ps1 "clips\<vod>"`. It lists the Reels and asks before posting. Add `-Yes` to skip the question.
+   - **Pi:** create an empty file named `APPROVED` in the clip folder (`touch /mnt/ssd/clips/<vod>/APPROVED`). The next poll posts it and replaces the file with `POSTED.txt`.
+     Or run it right away: `docker exec vod-fetcher /app/bin/ps5-vod-fetcher post /data/clips/<vod>`
+
+`posted.json` in each folder records the Reel links. Already-posted clips are never posted twice. A failed clip is retried up to 3 times. Uploads go straight from disk, so no public URL or port forwarding is needed.
+
+**One-time setup** (Instagram professional account; no Facebook Page needed):
+1. In the Instagram app, go to **Settings → Account type and tools** and switch to a **Creator** or **Business** account if you haven't already.
+2. At developers.facebook.com, choose **My Apps → Create app**. Pick the use case for managing messaging and content on Instagram (the "Instagram API" product).
+3. In the app, go to **Instagram → API setup with Instagram login**:
+   - **Generate access tokens → Add account**, log in with your Instagram account and allow it. If an invite shows up instead, accept it in the Instagram app under **Settings → Apps and websites → Tester invites**, then try again.
+   - Copy the generated **access token** into `IG_ACCESS_TOKEN=` in `vod.env`. It lasts 60 days, and the service refreshes it weekly so it doesn't expire. The current token is kept in `state/ig_token.json`.
+4. Check it: `./post.ps1 -Check` should print `Instagram token OK: @yourname`.
+
+While the app is in development mode, it can only post to accounts added to the app, which is all you need for your own account. No App Review is required for that, though Meta's docs aren't fully consistent on this.
+
+**Alternative: a Facebook system-user token (starts with `EAA`/`EAB`, never expires).** This is the setup that works without a Page:
+1. In your app, open **Facebook Login for Business → Configurations** and create one with the variation **"Instagram API (Unified Login)"**. Set the access token to **System-user access token**, add your **Instagram account** as a business asset, and include the permissions `instagram_basic` and `instagram_content_publish`.
+2. Generate the token for that configuration and paste it into `IG_ACCESS_TOKEN=`.
+3. Run `./post.ps1 -Check`. The app finds the account through `me/assigned_instagram_accounts`; a user token whose Instagram is linked to a Page also works. System-user tokens don't expire, so `FB_APP_ID` and `FB_APP_SECRET` aren't needed.
 
 ## Notes
 - **Quota:** each poll costs about 1 unit out of the default 10,000/day, so polling every 5 minutes uses about 288/day.

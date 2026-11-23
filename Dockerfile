@@ -25,6 +25,7 @@ COPY --from=build /src/build/install/ps5-vod-fetcher /app
 
 ENV DOWNLOAD_DIR=/data/vods \
     CLIPS_DIR=/data/clips \
+    IG_TOKEN_FILE=/data/ig_token.json \
     STATE_FILE=/data/processed.txt
 VOLUME /data
 

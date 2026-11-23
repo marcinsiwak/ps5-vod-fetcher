@@ -126,13 +126,43 @@ fun clipPending(cfg: Config, clipper: Clipper?) {
 
 // ---------- Main loop ----------
 fun main(args: Array<String>) {
+    if (args.isEmpty()) return service()
+    // Manual commands: print a clean error instead of a stack trace
+    try {
+        command(args)
+    } catch (e: Exception) {
+        log("Error: ${e.message}")
+        kotlin.system.exitProcess(1)
+    }
+}
+
+fun command(args: Array<String>) {
     // Manual mode: ps5-vod-fetcher clip <video.mp4> [more.mp4 ...]
     if (args.firstOrNull() == "clip") {
         val clipper = Clipper(ClipConfig.fromEnv() ?: error("Set ANTHROPIC_API_KEY to use clip"))
-        args.drop(1).forEach { clipper.process(File(it), force = true) }
+        args.drop(1).forEach { clipper.process(File(it), newRun = true) }
         return
     }
+    // Manual mode: ps5-vod-fetcher post <clips folder> [more folders ...]  (posts what's left after your review)
+    if (args.firstOrNull() == "post") {
+        val ig = Instagram.fromEnv() ?: error("Set IG_ACCESS_TOKEN to post to Instagram")
+        val (_, username) = ig.account()
+        log("Instagram: posting as @$username")
+        args.drop(1).forEach { ig.postFolder(File(it)) }
+        return
+    }
+    // Check the Instagram token: ps5-vod-fetcher ig-check
+    if (args.firstOrNull() == "ig-check") {
+        val ig = Instagram.fromEnv() ?: error("Set IG_ACCESS_TOKEN first")
+        val (id, username) = ig.account()
+        log("Instagram token OK: @$username (account id $id)")
+        return
+    }
+    error("Unknown command '${args.first()}'. Use: clip <video...> | post <clips folder...> | ig-check")
+}
 
+// ---------- Service: poll YouTube, download, clip, post approved ----------
+fun service() {
     val cfg = Config()
     val yt = YouTube(cfg)
     val clipper = ClipConfig.fromEnv()?.let { Clipper(it) }
@@ -140,6 +170,9 @@ fun main(args: Array<String>) {
     log("Started. Polling every ${cfg.pollSeconds}s, saving to ${cfg.downloadDir.absolutePath}")
     log(if (clipper != null) "Auto-clipping ON (shorts → ${ClipConfig.fromEnv()!!.outDir.absolutePath})"
         else "Auto-clipping OFF (set ANTHROPIC_API_KEY to enable)")
+    val ig = Instagram.fromEnv()
+    log(if (ig != null) "Instagram posting ON: folders with an $APPROVED_MARKER file get posted"
+        else "Instagram posting OFF (set IG_ACCESS_TOKEN to enable)")
 
     while (true) {
         try {
@@ -165,6 +198,7 @@ fun main(args: Array<String>) {
             log("Error: ${e.message}")
         }
         clipPending(cfg, clipper)
+        ig?.let { postApproved(it) }
         Thread.sleep(cfg.pollSeconds * 1000)
     }
 }

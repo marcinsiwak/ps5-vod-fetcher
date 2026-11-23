@@ -20,6 +20,11 @@ import kotlin.math.min
 fun clipsDir() = File(System.getenv("CLIPS_DIR") ?: "./clips")
 fun clipFolder(video: File) = File(clipsDir(), video.nameWithoutExtension.take(100))
 
+/** [base] if it's unused, else base_2, base_3, … (a folder counts as used once it has clips or a note) */
+fun nextFreeFolder(base: File): File = generateSequence(1) { it + 1 }
+    .map { n -> if (n == 1) base else File(base.parentFile, "${base.name}_$n") }
+    .first { !File(it, "clips.json").exists() && !File(it, MANUAL_NOTE).exists() }
+
 data class ClipConfig(
     val apiKey: String,
     val outDir: File = clipsDir(),
@@ -97,22 +102,25 @@ class Clipper(private val cfg: ClipConfig) {
     /**
      * Analyse [video] and render the best moments as vertical clips. Returns the output folder.
      * If the API can't be used (no credit / bad key) a CUT_MANUALLY.txt note is left instead and the VOD
-     * is not retried automatically; [force] (the manual `clip` command) ignores that note.
+     * is not retried automatically.
+     * [newRun] (the manual `clip` command) never skips and never overwrites: if the VOD was clipped before,
+     * this run goes to the next free folder (name_2, name_3, …) so earlier clips are kept.
      */
-    fun process(video: File, force: Boolean = false): File? {
-        val outDir = clipFolder(video)
-        if (File(outDir, "clips.json").exists()) {
-            log("Clips already exist for ${video.name}, skipping")
-            return outDir
+    fun process(video: File, newRun: Boolean = false): File? {
+        val base = clipFolder(video)
+        val outDir = if (newRun) nextFreeFolder(base) else base
+        if (!newRun) {
+            if (File(outDir, "clips.json").exists()) {
+                log("Clips already exist for ${video.name}, skipping")
+                return outDir
+            }
+            if (File(outDir, MANUAL_NOTE).exists()) return null
         }
-        val note = File(outDir, MANUAL_NOTE)
-        if (note.exists() && !force) return null
-        note.delete()
 
         try {
             preflight() // fail fast (and cheaply) before the heavy ffmpeg work
         } catch (e: ClipBlocked) {
-            writeManualNote(video, e.message!!, e.fix)
+            writeManualNote(video, e.message!!, e.fix, outDir)
             return null
         }
 
@@ -145,7 +153,7 @@ class Clipper(private val cfg: ClipConfig) {
             log("Clipper: saved ${out.size} clips to ${outDir.path}")
             return outDir
         } catch (e: ClipBlocked) { // e.g. credit ran out mid-VOD
-            writeManualNote(video, e.message!!, e.fix)
+            writeManualNote(video, e.message!!, e.fix, outDir)
             return null
         } finally {
             work.deleteRecursively()
@@ -272,8 +280,10 @@ class Clipper(private val cfg: ClipConfig) {
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-ss", c.startSec.toString(), "-i", video.path, "-t", (c.endSec - c.startSec).toString(),
             "-filter_complex", vf,
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", out.path,
+            // Instagram Reels limits: H.264 4:2:0, ≤25 Mbps video, AAC ≤48 kHz / 128 kbps, moov atom first
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-maxrate", "20M", "-bufsize", "40M",
+            "-pix_fmt", "yuv420p", "-fpsmax", "60",
+            "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-movflags", "+faststart", out.path,
         )
         if (!ok) log("Clipper: ffmpeg failed rendering ${out.name}")
         return ok
@@ -319,8 +329,8 @@ const val MANUAL_NOTE = "CUT_MANUALLY.txt"
 class ClipBlocked(reason: String, val fix: String) : Exception(reason)
 
 /** Leave a note next to where the clips would be, and shout in the log. */
-fun writeManualNote(video: File, reason: String, fix: String) {
-    val dir = clipFolder(video).apply { mkdirs() }
+fun writeManualNote(video: File, reason: String, fix: String, folder: File = clipFolder(video)) {
+    val dir = folder.apply { mkdirs() }
     File(dir, MANUAL_NOTE).writeText(
         """
         |No shorts were made automatically for this VOD — cut it yourself.
