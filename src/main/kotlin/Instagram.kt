@@ -222,10 +222,18 @@ class Instagram(private val envToken: String, private val tokenFile: File) {
 fun caption(c: ClipOut) = listOf(c.title, c.caption, c.hashtags.joinToString(" ") { "#" + it.removePrefix("#") })
     .map { it.trim() }.filter { it.isNotEmpty() }.joinToString("\n\n").take(2200)
 
-/** Pi workflow: post folders that contain an APPROVED file, then replace it with POSTED.txt. */
-fun postApproved(ig: Instagram) {
-    val dirs = clipsDir().listFiles { f -> f.isDirectory && File(f, APPROVED_MARKER).exists() && File(f, "clips.json").exists() }
-        ?: return
+/**
+ * Post clip folders that aren't finished yet (no POSTED.txt):
+ *  - every folder whose clips.json was written after [autoSince] (auto-posting; null = off), and
+ *  - any folder with an APPROVED file (manual approval, e.g. for older folders).
+ * Delete a clip's .mp4 before the run to keep it from being posted. Finished folders get POSTED.txt.
+ */
+fun postPending(ig: Instagram, autoSince: Instant?) {
+    val dirs = clipsDir().listFiles { f ->
+        val clips = File(f, "clips.json")
+        f.isDirectory && clips.exists() && !File(f, "POSTED.txt").exists() &&
+            (File(f, APPROVED_MARKER).exists() || (autoSince != null && clips.lastModified() > autoSince.toEpochMilli()))
+    } ?: return
     for (dir in dirs.sortedBy { it.name }) {
         try {
             if (ig.postFolder(dir)) {
@@ -234,7 +242,7 @@ fun postApproved(ig: Instagram) {
                 log("Instagram: done with ${dir.name}")
             }
         } catch (e: Exception) {
-            log("Instagram: error in ${dir.name}, will retry next poll: ${e.message}")
+            log("Instagram: error in ${dir.name}, will retry next run: ${e.message}")
         }
     }
 }

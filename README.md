@@ -1,6 +1,6 @@
 # PS5 → YouTube → VOD fetcher
 
-Every few minutes this service checks your YouTube channel for live streams that have finished, then downloads each new VOD with `yt-dlp`.
+Once a day at **4:00 Polish time** (`RUN_AT=04:00`, `RUN_TZ=Europe/Warsaw`) this service checks your YouTube channel for live streams that have finished, downloads each new VOD with `yt-dlp`, clips it and publishes the clips as Instagram Reels. Set `RUN_AT=off` to poll every `POLL_SECONDS` instead.
 
 ```
 PS5 (Create → Broadcast → YouTube, Unlisted)
@@ -35,8 +35,10 @@ export YT_CLIENT_ID=...
 export YT_CLIENT_SECRET=...
 export YT_REFRESH_TOKEN=...
 export DOWNLOAD_DIR=/data/vods        # optional, default ./vods
-export POLL_SECONDS=300               # optional
-export LOOKBACK_HOURS=24              # optional: ignore older streams on first run
+export RUN_AT=04:00                   # optional: daily run time (default 04:00), or "off" to poll
+export RUN_TZ=Europe/Warsaw           # optional: time zone for RUN_AT (default Europe/Warsaw)
+export POLL_SECONDS=300               # optional: only used with RUN_AT=off
+export LOOKBACK_HOURS=48              # optional: ignore older streams (default 48 daily / 24 polling)
 # export YT_COOKIES_FILE=cookies.txt  # only for Private broadcasts
 # export POST_DOWNLOAD_CMD="rclone copy --"   # optional: file path is appended as the last arg
 
@@ -153,17 +155,16 @@ For YouTube VODs, analysis uses a 360p copy that is deleted afterwards. Clips ar
 
 Output goes to `clips/<video-id>/`: the clips, plus `highlights.json` listing why each moment was picked.
 
-## 8. Instagram Reels posting (after you review)
-Nothing is posted automatically. Clips wait in their folder until you approve them.
+## 8. Instagram Reels posting (automatic)
+**Every new clip is published as a Reel automatically** at the daily run, right after clipping. Instagram's API can't save drafts, so there is no draft step. To review before posting, set `AUTO_POST=false` (see below).
 
-**Review → post:**
-1. Open `clips\<vod>\`, watch the clips, and **delete the `.mp4`s you don't want**. You can also edit `title` / `caption` / `hashtags` in `clips.json`. The Instagram caption is title + caption + hashtags.
-2. Post what's left:
-   - **PC:** `./post.ps1 "clips\<vod>"`. It lists the Reels and asks before posting. Add `-Yes` to skip the question.
-   - **Pi:** create an empty file named `APPROVED` in the clip folder (`touch /mnt/ssd/clips/<vod>/APPROVED`). The next poll posts it and replaces the file with `POSTED.txt`.
-     Or run it right away: `docker exec vod-fetcher /app/bin/ps5-vod-fetcher post /data/clips/<vod>`
+- **Which folders:** clip folders whose `clips.json` was written within the last `LOOKBACK_HOURS` and that have no `POSTED.txt` yet. Older folders are never posted automatically.
+- **Skipping a clip:** delete its `.mp4` (or edit `title` / `caption` / `hashtags` in `clips.json`) before the next run. The Instagram caption is title + caption + hashtags.
+- **Older folders:** create an empty `APPROVED` file in the folder (`touch /mnt/ssd/clips/<vod>/APPROVED`) and it's posted at the next run.
+- **Post right away:** `docker exec vod-fetcher /app/bin/ps5-vod-fetcher post /data/clips/<vod>`, or on the PC `./post.ps1 "clips\<vod>"` (asks first; `-Yes` skips the question).
+- **Review first instead:** set `AUTO_POST=false` in `vod.env`. Then only folders with an `APPROVED` file get posted.
 
-`posted.json` in each folder records the Reel links. Already-posted clips are never posted twice. A failed clip is retried up to 3 times. Uploads go straight from disk, so no public URL or port forwarding is needed.
+When a folder is done, it gets `POSTED.txt`. `posted.json` in each folder records the Reel links. Already-posted clips are never posted twice. A failed clip is retried up to 3 times (once per run). Uploads go straight from disk, so no public URL or port forwarding is needed.
 
 **One-time setup** (Instagram professional account; no Facebook Page needed):
 1. In the Instagram app, go to **Settings → Account type and tools** and switch to a **Creator** or **Business** account if you haven't already.
@@ -181,8 +182,8 @@ While the app is in development mode, it can only post to accounts added to the 
 3. Run `./post.ps1 -Check`. The app finds the account through `me/assigned_instagram_accounts`; a user token whose Instagram is linked to a Page also works. System-user tokens don't expire, so `FB_APP_ID` and `FB_APP_SECRET` aren't needed.
 
 ## Notes
-- **Quota:** each poll costs about 1 unit out of the default 10,000/day, so polling every 5 minutes uses about 288/day.
-- **Retries:** YouTube needs some time to process a VOD after the stream ends. Failed downloads are retried on the next poll and only marked as done in `processed.txt` once they succeed.
+- **Quota:** each check costs about 1 unit out of the default 10,000/day (daily mode: 1/day; polling every 5 minutes: about 288/day).
+- **Retries:** YouTube needs some time to process a VOD after the stream ends. Failed downloads are retried on the next run and only marked as done in `processed.txt` once they succeed.
 - **Quality:** the VOD is limited to what the PS5 broadcast at (Settings → Captures and Broadcasts → Broadcasts → Video quality).
 - yt-dlp breaks now and then when YouTube changes something. Each `./push.ps1` installs the latest version into the image, so re-run it (with `-Deploy`) when downloads start failing.
 - Logs: `docker logs -f vod-fetcher`

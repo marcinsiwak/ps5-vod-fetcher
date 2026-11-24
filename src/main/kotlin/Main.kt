@@ -8,6 +8,9 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.time.Duration
 import java.time.Instant
+import java.time.LocalTime
+import java.time.ZoneId
+import java.time.ZonedDateTime
 
 // ---------- Config (env vars) ----------
 data class Config(
@@ -17,12 +20,20 @@ data class Config(
     val downloadDir: File = File(System.getenv("DOWNLOAD_DIR") ?: "./vods"),
     val stateFile: File = File(System.getenv("STATE_FILE") ?: "./processed.txt"),
     val pollSeconds: Long = System.getenv("POLL_SECONDS")?.toLong() ?: 300,
-    // Only grab streams that ended within this window (avoids downloading your whole history on first run)
-    val lookbackHours: Long = System.getenv("LOOKBACK_HOURS")?.toLong() ?: 24,
+    // Run the whole cycle (fetch → download → clip → post) once a day at this local time.
+    // RUN_AT=off (or empty) falls back to polling every POLL_SECONDS.
+    val runAt: LocalTime? = (System.getenv("RUN_AT") ?: "04:00").trim()
+        .takeUnless { it.isEmpty() || it.equals("off", ignoreCase = true) }?.let(LocalTime::parse),
+    val runZone: ZoneId = ZoneId.of(System.getenv("RUN_TZ")?.takeIf { it.isNotBlank() } ?: "Europe/Warsaw"),
+    // Only grab streams that ended within this window (avoids downloading your whole history on first run).
+    // Daily mode defaults to 48 h so a VOD that wasn't ready yet still gets picked up the next day.
+    val lookbackHours: Long = System.getenv("LOOKBACK_HOURS")?.toLong() ?: if (runAt != null) 48 else 24,
     // Optional: Netscape cookies file, needed only if your broadcasts are PRIVATE (unlisted works without)
     val cookiesFile: String? = System.getenv("YT_COOKIES_FILE"),
     // Optional: command run after a successful download, file path appended as last arg (e.g. upload to S3)
     val postDownloadCmd: String? = System.getenv("POST_DOWNLOAD_CMD"),
+    // Publish every new clip to Instagram automatically (no APPROVED file needed). AUTO_POST=false → approval only.
+    val autoPost: Boolean = System.getenv("AUTO_POST")?.lowercase() != "false",
 )
 
 fun env(name: String) = System.getenv(name) ?: error("Missing env var $name")
@@ -226,14 +237,17 @@ fun service() {
     val yt = YouTube(cfg)
     val clipper = ClipConfig.fromEnv()?.let { Clipper(it) }
     val processed = cfg.stateFile.takeIf { it.exists() }?.readLines()?.toMutableSet() ?: mutableSetOf()
-    log("Started. Polling every ${cfg.pollSeconds}s, saving to ${cfg.downloadDir.absolutePath}")
+    log(if (cfg.runAt != null) "Started. Running daily at ${cfg.runAt} ${cfg.runZone}, saving to ${cfg.downloadDir.absolutePath}"
+        else "Started. Polling every ${cfg.pollSeconds}s, saving to ${cfg.downloadDir.absolutePath}")
     log(if (clipper != null) "Auto-clipping ON (shorts → ${ClipConfig.fromEnv()!!.outDir.absolutePath})"
         else "Auto-clipping OFF (Claude Code CLI not installed, or CLIP_ENABLED=false)")
     val ig = Instagram.fromEnv()
-    log(if (ig != null) "Instagram posting ON: folders with an $APPROVED_MARKER file get posted"
-        else "Instagram posting OFF (set IG_ACCESS_TOKEN to enable)")
+    log(if (ig == null) "Instagram posting OFF (set IG_ACCESS_TOKEN to enable)"
+        else if (cfg.autoPost) "Instagram posting ON: every new clip is published automatically (AUTO_POST=false to require $APPROVED_MARKER)"
+        else "Instagram posting ON: folders with an $APPROVED_MARKER file get posted")
 
     while (true) {
+        cfg.runAt?.let { waitUntil(it, cfg.runZone) }
         try {
             val cutoff = Instant.now().minus(Duration.ofHours(cfg.lookbackHours))
             val fresh = yt.completedBroadcasts().filter { b ->
@@ -257,7 +271,17 @@ fun service() {
             log("Error: ${e.message}")
         }
         clipPending(cfg, clipper)
-        ig?.let { postApproved(it) }
-        Thread.sleep(cfg.pollSeconds * 1000)
+        ig?.let { postPending(it, if (cfg.autoPost) Instant.now().minus(Duration.ofHours(cfg.lookbackHours)) else null) }
+        if (cfg.runAt == null) Thread.sleep(cfg.pollSeconds * 1000)
     }
+}
+
+/** Sleeps until the next [time] in [zone] (DST-aware). */
+fun waitUntil(time: LocalTime, zone: ZoneId) {
+    val now = ZonedDateTime.now(zone)
+    var next = now.with(time).withSecond(0).withNano(0)
+    if (!next.isAfter(now)) next = next.plusDays(1).with(time)
+    log("Next run: $next")
+    Thread.sleep(Duration.between(now, next).toMillis())
+    log("Daily run starting")
 }
