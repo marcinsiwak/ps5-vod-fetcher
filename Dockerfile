@@ -1,5 +1,5 @@
 # ---------- build ----------
-FROM eclipse-temurin:17-jdk AS build
+FROM --platform=$BUILDPLATFORM eclipse-temurin:17-jdk AS build
 WORKDIR /src
 COPY gradlew settings.gradle.kts build.gradle.kts ./
 COPY gradle gradle
