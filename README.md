@@ -39,6 +39,7 @@ export RUN_AT=04:00                   # optional: daily run time (default 04:00)
 export RUN_TZ=Europe/Warsaw           # optional: time zone for RUN_AT (default Europe/Warsaw)
 export POLL_SECONDS=300               # optional: only used with RUN_AT=off
 export LOOKBACK_HOURS=48              # optional: ignore older streams (default 48 daily / 24 polling)
+export VOD_RETENTION_DAYS=7           # optional: delete VODs this many days after download (default 7, 0 = keep)
 # export YT_COOKIES_FILE=cookies.txt  # only for Private broadcasts
 # export POST_DOWNLOAD_CMD="rclone copy --"   # optional: file path is appended as the last arg
 
@@ -63,7 +64,7 @@ mkdir -p ~/vod-fetcher && cd ~/vod-fetcher
 # copy deploy/vod.env.example here as vod.env and fill in the secrets
 nano vod.env
 ```
-The deploy job copies `deploy/docker-compose.yml` into `~/vod-fetcher` and starts the container. Videos go to `/mnt/ssd/vods` by default; to change that, add `VODS_DIR=/your/path` to a `.env` file next to the compose file. State (`processed.txt`) is kept in `~/vod-fetcher/state`.
+The deploy job copies `deploy/docker-compose.yml` into `~/vod-fetcher` and starts the container. Videos go to `/mnt/ssd/vods` by default; to change that, add `VODS_DIR=/your/path` to a `.env` file next to the compose file. State is kept in `~/vod-fetcher/state`: `processed.txt` (downloaded streams) and `clipped.txt` (clipped VODs), so a recreated container never downloads or clips the same VOD twice. Downloaded VODs are deleted after `VOD_RETENTION_DAYS` (default 7); clips are kept.
 
 ## 5. Push to Docker Hub & deploy
 Build the image on your PC and push it to Docker Hub as `<user>/ps5-vod-fetcher:latest` and `:<commit-sha>`. The image is multi-arch (`linux/amd64` + `linux/arm64`), so it runs on both your PC and the Pi.

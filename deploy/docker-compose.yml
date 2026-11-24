@@ -8,6 +8,7 @@ services:
       DOWNLOAD_DIR: /data/vods
       CLIPS_DIR: /data/clips
       STATE_FILE: /data/processed.txt
+      CLIPPED_FILE: /data/clipped.txt
     volumes:
       - ${VODS_DIR:-/mnt/ssd/vods}:/data/vods
       - ${CLIPS_DIR:-/mnt/ssd/clips}:/data/clips

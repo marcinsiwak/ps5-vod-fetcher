@@ -16,6 +16,27 @@ import kotlin.math.min
 fun clipsDir() = File(System.getenv("CLIPS_DIR") ?: "./clips")
 fun clipFolder(video: File) = File(clipsDir(), video.nameWithoutExtension.take(100))
 
+/**
+ * VODs that were clipped already (one file name per line). Kept next to processed.txt in /data, so it survives
+ * a recreated container and a cleaned-up clips folder: the service never clips the same VOD twice.
+ */
+object ClippedLog {
+    private val file = File(System.getenv("CLIPPED_FILE") ?: "./clipped.txt")
+    private val names: MutableSet<String> by lazy {
+        file.takeIf { it.exists() }?.readLines()?.map { it.trim() }?.filter { it.isNotEmpty() }?.toMutableSet()
+            ?: mutableSetOf()
+    }
+
+    operator fun contains(video: File) = video.nameWithoutExtension in names
+
+    fun add(video: File) {
+        if (names.add(video.nameWithoutExtension)) {
+            file.absoluteFile.parentFile?.mkdirs()
+            file.appendText("${video.nameWithoutExtension}\n")
+        }
+    }
+}
+
 /** [base] if it's unused, else base_2, base_3, … (a folder counts as used once it has clips or a note) */
 fun nextFreeFolder(base: File): File = generateSequence(1) { it + 1 }
     .map { n -> if (n == 1) base else File(base.parentFile, "${base.name}_$n") }
@@ -128,8 +149,10 @@ class Clipper(private val cfg: ClipConfig) {
         val base = clipFolder(video)
         val outDir = if (newRun) nextFreeFolder(base) else base
         if (!newRun) {
+            if (video in ClippedLog) return outDir // clipped before (maybe in an earlier container)
             if (File(outDir, "clips.json").exists()) {
                 log("Clips already exist for ${video.name}, skipping")
+                ClippedLog.add(video) // VODs clipped before this log existed
                 return outDir
             }
             if (File(outDir, MANUAL_NOTE).exists()) return null
@@ -164,6 +187,7 @@ class Clipper(private val cfg: ClipConfig) {
                 } else null
             }
             File(outDir, "clips.json").writeText(prettyJson.encodeToString(out))
+            ClippedLog.add(video)
             File(outDir, "captions.md").writeText(out.joinToString("\n\n") {
                 "## ${it.file}\n**${it.title}** (${it.category}, ${it.score}/10, ${fmt(it.startSec)}–${fmt(it.endSec)})\n\n" +
                     "${it.caption}\n\n${it.hashtags.joinToString(" ") { h -> "#$h" }}"

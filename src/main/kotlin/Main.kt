@@ -34,6 +34,8 @@ data class Config(
     val postDownloadCmd: String? = System.getenv("POST_DOWNLOAD_CMD"),
     // Publish every new clip to Instagram automatically (no APPROVED file needed). AUTO_POST=false → approval only.
     val autoPost: Boolean = System.getenv("AUTO_POST")?.lowercase() != "false",
+    // Delete downloaded VODs this many days after download (0 = keep forever). Clips are kept.
+    val vodRetentionDays: Long = System.getenv("VOD_RETENTION_DAYS")?.takeIf { it.isNotBlank() }?.toLong() ?: 7,
 )
 
 fun env(name: String) = System.getenv(name) ?: error("Missing env var $name")
@@ -95,6 +97,7 @@ fun download(cfg: Config, b: Broadcast): File? {
         "-f", "bv*+ba/b",
         "--merge-output-format", "mp4",
         "--no-progress",
+        "--no-mtime", // file date = download date, used by clipPending and deleteOldVods
         "--print", "after_move:filepath",
         "-o", "${cfg.downloadDir.absolutePath}/%(upload_date)s_%(title).80B_%(id)s.%(ext)s",
     )
@@ -110,6 +113,17 @@ fun runPostCmd(cfg: Config, file: File) {
     val base = cfg.postDownloadCmd ?: return
     val p = ProcessBuilder(listOf("sh", "-c", "$base \"\$1\"", "sh", file.absolutePath)).inheritIO().start()
     if (p.waitFor() != 0) log("Post-download command failed for ${file.name}")
+}
+
+/** Deletes VODs (and leftover partial downloads) older than VOD_RETENTION_DAYS. processed.txt keeps them from being re-downloaded. */
+fun deleteOldVods(cfg: Config) {
+    if (cfg.vodRetentionDays <= 0) return
+    val cutoff = System.currentTimeMillis() - cfg.vodRetentionDays * 86_400_000
+    val videoExt = setOf("mp4", "mkv", "webm", "part", "ytdl")
+    cfg.downloadDir.listFiles { f -> f.isFile && f.extension in videoExt && f.lastModified() < cutoff }?.forEach { f ->
+        if (f.delete()) log("Deleted ${f.name} (older than ${cfg.vodRetentionDays} days)")
+        else log("Could not delete ${f.name}")
+    }
 }
 
 fun log(msg: String) = println("[${Instant.now()}] $msg")
@@ -239,6 +253,8 @@ fun service() {
     val processed = cfg.stateFile.takeIf { it.exists() }?.readLines()?.toMutableSet() ?: mutableSetOf()
     log(if (cfg.runAt != null) "Started. Running daily at ${cfg.runAt} ${cfg.runZone}, saving to ${cfg.downloadDir.absolutePath}"
         else "Started. Polling every ${cfg.pollSeconds}s, saving to ${cfg.downloadDir.absolutePath}")
+    log(if (cfg.vodRetentionDays > 0) "VODs are deleted ${cfg.vodRetentionDays} days after download (VOD_RETENTION_DAYS=0 keeps them)"
+        else "VODs are kept forever (VOD_RETENTION_DAYS=0)")
     log(if (clipper != null) "Auto-clipping ON (shorts → ${ClipConfig.fromEnv()!!.outDir.absolutePath})"
         else "Auto-clipping OFF (Claude Code CLI not installed, or CLIP_ENABLED=false)")
     val ig = Instagram.fromEnv()
@@ -272,6 +288,7 @@ fun service() {
         }
         clipPending(cfg, clipper)
         ig?.let { postPending(it, if (cfg.autoPost) Instant.now().minus(Duration.ofHours(cfg.lookbackHours)) else null) }
+        try { deleteOldVods(cfg) } catch (e: Exception) { log("Cleanup error: ${e.message}") }
         if (cfg.runAt == null) Thread.sleep(cfg.pollSeconds * 1000)
     }
 }
