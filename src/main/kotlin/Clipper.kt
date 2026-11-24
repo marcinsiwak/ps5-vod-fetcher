@@ -240,7 +240,8 @@ class Clipper(private val cfg: ClipConfig) {
         // Other errors propagate: process() then writes nothing and the VOD is retried on the next poll
         val res = callClaude(
             "section ${fmt(from)}–${fmt(to)}", sheets.first().parentFile, prompt,
-            "--tools", "Read", "--allowedTools", "Read", "--json-schema", CLIP_SCHEMA, "--system-prompt", SYSTEM_PROMPT,
+            "--tools", "Read", "--allowedTools", "Read", "--json-schema", CLIP_SCHEMA,
+            "--system-prompt-file", File(sheets.first().parentFile, "system-prompt.txt").apply { writeText(SYSTEM_PROMPT) }.path,
         )
         val structured = res["structured_output"] as? JsonObject
         if (structured == null) {
@@ -319,7 +320,8 @@ class Clipper(private val cfg: ClipConfig) {
      */
     private fun callClaude(what: String, dir: File, prompt: String, vararg extra: String): JsonObject {
         // a --model in [extra] overrides this one (last flag wins)
-        val cmd = listOf(cfg.claudeBin, "-p", "--output-format", "json", "--model", cfg.model, "--no-session-persistence") + extra
+        val cmd = (listOf(cfg.claudeBin, "-p", "--output-format", "json", "--model", cfg.model, "--no-session-persistence") + extra)
+            .map(::windowsArg)
         val pb = ProcessBuilder(cmd).directory(dir).redirectError(ProcessBuilder.Redirect.INHERIT)
         pb.environment().remove("ANTHROPIC_API_KEY")
         val p = try { pb.start() } catch (e: Exception) {
@@ -352,6 +354,25 @@ class Clipper(private val cfg: ClipConfig) {
     private fun probeDuration(video: File): Double =
         runCapture("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", video.path)
             .firstOrNull()?.trim()?.toDoubleOrNull() ?: error("ffprobe could not read ${video.name}")
+}
+
+/**
+ * On Windows, Java's ProcessBuilder doesn't escape double quotes inside arguments, so claude.exe would get
+ * the JSON schema with its quotes stripped ("--json-schema is not valid JSON"). Quote + escape such args.
+ */
+private fun windowsArg(arg: String): String {
+    if (!System.getProperty("os.name").startsWith("Windows") || arg.isEmpty()) return arg
+    if (arg.none { it == '"' || it == ' ' || it == '\t' }) return arg
+    val sb = StringBuilder("\"")
+    var backslashes = 0
+    for (ch in arg) {
+        when (ch) {
+            '\\' -> backslashes++
+            '"' -> { sb.append("\\".repeat(backslashes * 2 + 1)).append('"'); backslashes = 0 }
+            else -> { sb.append("\\".repeat(backslashes)).append(ch); backslashes = 0 }
+        }
+    }
+    return sb.append("\\".repeat(backslashes * 2)).append('"').toString()
 }
 
 // ---------- "cut it yourself" fallback ----------

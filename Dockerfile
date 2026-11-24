@@ -16,9 +16,10 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=denoland/deno:bin-2.5.6 /deno /usr/local/bin/deno
 
-# yt-dlp[default] pulls in yt-dlp-ejs (YouTube JS challenge solver)
+# yt-dlp[default] pulls in yt-dlp-ejs (YouTube JS challenge solver).
+# --pre = nightly: YouTube changes often, stable releases lag behind ("n challenge solving failed").
 RUN python3 -m venv /opt/yt-dlp \
- && /opt/yt-dlp/bin/pip install --no-cache-dir -U "yt-dlp[default]"
+ && /opt/yt-dlp/bin/pip install --no-cache-dir -U --pre "yt-dlp[default]"
 ENV PATH="/opt/yt-dlp/bin:${PATH}"
 
 # Claude Code CLI for AI clipping (uses your Claude subscription via CLAUDE_CODE_OAUTH_TOKEN, no API key)

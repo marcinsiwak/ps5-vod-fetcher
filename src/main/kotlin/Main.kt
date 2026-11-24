@@ -136,20 +136,70 @@ fun main(args: Array<String>) {
     }
 }
 
+/** Pulls `--max N` out of [rest] (if present) into the clip config. */
+fun clipConfigWithMax(rest: MutableList<String>): ClipConfig {
+    var cfg = ClipConfig.fromEnv() ?: error("The Claude Code CLI (claude) is not installed, or CLIP_ENABLED=false")
+    val i = rest.indexOf("--max")
+    if (i >= 0) {
+        val n = rest.getOrNull(i + 1)?.toIntOrNull()?.takeIf { it > 0 } ?: error("--max needs a number, e.g. --max 5")
+        cfg = cfg.copy(maxClips = n)
+        rest.subList(i, i + 2).clear()
+    }
+    return cfg
+}
+
+/** A VOD already downloaded to DOWNLOAD_DIR (file names end in _<video id>.mp4). */
+fun downloadedVod(cfg: Config, b: Broadcast): File? =
+    cfg.downloadDir.listFiles { f -> f.extension == "mp4" && f.nameWithoutExtension.endsWith("_${b.id}") }?.firstOrNull()
+
 fun command(args: Array<String>) {
     // Manual mode: ps5-vod-fetcher clip [--max N] <video.mp4> [more.mp4 ...]
     if (args.firstOrNull() == "clip") {
-        var cfg = ClipConfig.fromEnv() ?: error("The Claude Code CLI (claude) is not installed, or CLIP_ENABLED=false")
         val rest = args.drop(1).toMutableList()
-        val i = rest.indexOf("--max")
-        if (i >= 0) {
-            val n = rest.getOrNull(i + 1)?.toIntOrNull()?.takeIf { it > 0 } ?: error("--max needs a number, e.g. --max 5")
-            cfg = cfg.copy(maxClips = n)
-            rest.subList(i, i + 2).clear()
-        }
+        val clipper = Clipper(clipConfigWithMax(rest))
         if (rest.isEmpty()) error("Usage: clip [--max N] <video.mp4> [more.mp4 ...]")
-        val clipper = Clipper(cfg)
         rest.forEach { clipper.process(File(it), newRun = true) }
+        return
+    }
+    // Numbered list of your finished streams (newest first): ps5-vod-fetcher list
+    if (args.firstOrNull() == "list") {
+        val cfg = Config()
+        val vods = YouTube(cfg).completedBroadcasts()
+        if (vods.isEmpty()) return println("No finished streams found on your channel.")
+        vods.forEachIndexed { n, b ->
+            val ended = b.snippet.actualEndTime?.take(16)?.replace('T', ' ') ?: "?"
+            val mark = if (downloadedVod(cfg, b) != null) "  [downloaded]" else ""
+            println("%3d. %s  %s  (%s)%s".format(n + 1, ended, b.snippet.title, b.id, mark))
+        }
+        return
+    }
+    // Only download VOD number N from `list`: ps5-vod-fetcher download N
+    if (args.firstOrNull() == "download") {
+        val n = args.getOrNull(1)?.toIntOrNull() ?: error("Usage: download <number from list>")
+        val cfg = Config()
+        val vods = YouTube(cfg).completedBroadcasts()
+        val b = vods.getOrNull(n - 1) ?: error("No VOD number $n (there are ${vods.size}; see `list`)")
+        log("VOD $n: '${b.snippet.title}' (${b.id})")
+        downloadedVod(cfg, b)?.let { log("Already downloaded: ${it.absolutePath}"); return }
+        val file = download(cfg, b)
+            ?: error("Download failed for ${b.id} (if the stream just ended, YouTube may still be processing it)")
+        log("Saved ${file.absolutePath} (${file.length() / 1_048_576} MB)")
+        return
+    }
+    // Download (if needed) and clip VOD number N from `list`: ps5-vod-fetcher clip-vod N [--max M]
+    if (args.firstOrNull() == "clip-vod") {
+        val rest = args.drop(1).toMutableList()
+        val clipCfg = clipConfigWithMax(rest)
+        val n = rest.singleOrNull()?.toIntOrNull() ?: error("Usage: clip-vod <number from list> [--max N]")
+        val cfg = Config()
+        val vods = YouTube(cfg).completedBroadcasts()
+        val b = vods.getOrNull(n - 1) ?: error("No VOD number $n (there are ${vods.size}; see `list`)")
+        log("VOD $n: '${b.snippet.title}' (${b.id})")
+        val file = downloadedVod(cfg, b)?.also { log("Already downloaded: ${it.name}") }
+            ?: run { log("Downloading…"); download(cfg, b) }
+            ?: error("Download failed for ${b.id} (if the stream just ended, YouTube may still be processing it)")
+        val out = Clipper(clipCfg).process(file, newRun = true)
+        log(if (out != null) "Done → ${out.absolutePath}" else "No clips made, see the note above")
         return
     }
     // Manual mode: ps5-vod-fetcher post <clips folder> [more folders ...]  (posts what's left after your review)
@@ -167,7 +217,7 @@ fun command(args: Array<String>) {
         log("Instagram token OK: @$username (account id $id)")
         return
     }
-    error("Unknown command '${args.first()}'. Use: clip [--max N] <video...> | post <clips folder...> | ig-check")
+    error("Unknown command '${args.first()}'. Use: list | download <n> | clip-vod <n> [--max N] | clip [--max N] <video...> | post <clips folder...> | ig-check")
 }
 
 // ---------- Service: poll YouTube, download, clip, post approved ----------

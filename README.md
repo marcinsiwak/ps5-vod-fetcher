@@ -115,6 +115,16 @@ If Claude has a temporary problem (usage limit reached, outage), nothing is writ
 Options: `-Style blur|crop`, `-MaxClips N`, `-Model opus`, `-FrameInterval N`, `-Out <folder>`, `-Build` (rebuild the image after code changes).
 Running it again on the same video never overwrites anything. Each run saves to the next free folder (`_2`, `_3`, …), so you can compare settings.
 
+**On your PC without Docker** (`local.ps1`): lists your finished streams, asks which one to clip and how many clips to make, downloads it to `vods\` if needed, and clips it to `clips\`. It reads `vod.env` and uses your `claude` login. On the first run it offers to install the missing tools with winget (JDK 17, ffmpeg, yt-dlp, deno).
+```powershell
+./local.ps1                      # pick from the list
+./local.ps1 -Vod 2 -Max 5        # VOD number 2 from the list, at most 5 clips
+./local.ps1 -Vod 1 -Model opus   # sharper picks
+./local.ps1 -List                # just show the list
+./local.ps1 -Vod 2 -DownloadOnly # just download it to vods\ (test the YouTube side)
+```
+The same commands work in the app itself: `list`, `download <n>` and `clip-vod <n> [--max N]`.
+
 **Run it by hand** on the Pi or in Docker:
 ```bash
 docker run --rm --env-file vod.env -v "$PWD/vods:/data/vods" -v "$PWD/clips:/data/clips" \
