@@ -94,7 +94,7 @@ Using the **Claude Code CLI on your Claude subscription** (no API key), every do
 How it works (`src/main/kotlin/Clipper.kt`):
 1. **Audio scan:** ffmpeg measures loudness every second, and spikes (explosions, crashes, shouting) are passed to Claude as hints.
 2. **Contact sheets:** one keyframe every `CLIP_FRAME_INTERVAL` seconds (default 4), tiled 3×3, so each image covers 36 s of footage. Only keyframes are decoded, so this is fast on a Pi.
-3. **Claude**, run as `claude -p` (`CLIP_MODEL=haiku` by default, or `sonnet`/`opus` for sharper picks), reads about 12 minutes of sheets per run with its Read tool and returns clip candidates as structured JSON: start/end, category, score from 1 to 10, title, caption and hashtags.
+3. **Claude**, run as `claude -p` (`CLIP_MODEL=haiku` by default, or `sonnet`/`opus` for sharper picks), reads about 12 minutes of sheets per run with its Read tool and returns clip candidates as structured JSON: start/end, category, score from 1 to 10, game, title, caption and hashtags. Cutscenes, cinematics, replays and photo mode are never clipped (Claude flags clips that include one and they are dropped).
 4. The best non-overlapping clips scoring 5 or more (up to `MAX_CLIPS`) are rendered with ffmpeg. `CLIP_STYLE=blur` keeps the whole 16:9 frame on a blurred background; `crop` does a center crop.
 
 Output goes to `CLIPS_DIR/<vod name>/` (on the Pi: `/mnt/ssd/clips`, which you can change with `CLIPS_DIR=` in `.env`):
@@ -160,7 +160,7 @@ Output goes to `clips/<video-id>/`: the clips, plus `highlights.json` listing wh
 **Every new clip is published as a Reel automatically** at the daily run, right after clipping. Instagram's API can't save drafts, so there is no draft step. To review before posting, set `AUTO_POST=false` (see below).
 
 - **Which folders:** clip folders whose `clips.json` was written within the last `LOOKBACK_HOURS` and that have no `POSTED.txt` yet. Older folders are never posted automatically.
-- **Skipping a clip:** delete its `.mp4` (or edit `title` / `caption` / `hashtags` in `clips.json`) before the next run. The Instagram caption is title + caption + hashtags.
+- **Skipping a clip:** delete its `.mp4` (or edit `title` / `caption` / `hashtags` in `clips.json`) before the next run. The Instagram caption is written for reach: a hook line (title), 1-2 keyword-rich sentences naming the game with a call to action that invites comments (caption), then 3-5 relevant hashtags (Instagram allows at most 5; extras are dropped).
 - **Older folders:** create an empty `APPROVED` file in the folder (`touch /mnt/ssd/clips/<vod>/APPROVED`) and it's posted at the next run.
 - **Post right away:** `docker exec vod-fetcher /app/bin/ps5-vod-fetcher post /data/clips/<vod>`, or on the PC `./post.ps1 "clips\<vod>"` (asks first; `-Yes` skips the question).
 - **Review first instead:** set `AUTO_POST=false` in `vod.env`. Then only folders with an `APPROVED` file get posted.

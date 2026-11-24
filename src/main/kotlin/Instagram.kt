@@ -218,8 +218,11 @@ class Instagram(private val envToken: String, private val tokenFile: File) {
     private fun enc(s: String) = URLEncoder.encode(s, Charsets.UTF_8)
 }
 
-/** Reel caption: hook title, caption, hashtags (edit them in clips.json before approving). */
-fun caption(c: ClipOut) = listOf(c.title, c.caption, c.hashtags.joinToString(" ") { "#" + it.removePrefix("#") })
+/**
+ * Reel caption: hook line, keyword-rich text with a call to action, then max 5 hashtags at the end
+ * (Instagram's limit). Edit title / caption / hashtags in clips.json before approving.
+ */
+fun caption(c: ClipOut) = listOf(c.title, c.caption, cleanHashtags(c.hashtags).joinToString(" ") { "#$it" })
     .map { it.trim() }.filter { it.isNotEmpty() }.joinToString("\n\n").take(2200)
 
 /**

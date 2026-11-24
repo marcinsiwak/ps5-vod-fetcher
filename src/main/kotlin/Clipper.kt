@@ -81,6 +81,10 @@ data class ClipConfig(
     val caption: String,
     val hashtags: List<String>,
     val reason: String,
+    /** Game shown in the clip, e.g. "Gran Turismo 7" ("" if unsure) */
+    val game: String = "",
+    /** true if any part of the clip is a cutscene / cinematic; such clips are dropped */
+    val cutscene: Boolean = false,
 )
 @Serializable data class ClipIdeas(val clips: List<ClipIdea>)
 
@@ -88,19 +92,21 @@ data class ClipConfig(
 private val CLIP_SCHEMA = """
 {"type":"object","additionalProperties":false,"required":["clips"],"properties":{"clips":{"type":"array","items":{
 "type":"object","additionalProperties":false,
-"required":["startSec","endSec","category","score","title","caption","hashtags","reason"],
+"required":["startSec","endSec","category","score","title","caption","hashtags","reason","game","cutscene"],
 "properties":{
 "startSec":{"type":"integer"},"endSec":{"type":"integer"},
 "category":{"type":"string","enum":["gameplay","stunt","funny","unexpected"]},
 "score":{"type":"integer","minimum":1,"maximum":10},
 "title":{"type":"string"},"caption":{"type":"string"},
-"hashtags":{"type":"array","items":{"type":"string"}},"reason":{"type":"string"}}}}}}
+"hashtags":{"type":"array","maxItems":5,"items":{"type":"string"}},"reason":{"type":"string"},
+"game":{"type":"string"},"cutscene":{"type":"boolean"}}}}}}
 """.trimIndent().replace("\n", "")
 
 // What we write next to the rendered clips
 @Serializable data class ClipOut(
     val file: String, val startSec: Long, val endSec: Long, val category: String,
     val score: Long, val title: String, val caption: String, val hashtags: List<String>, val reason: String,
+    val game: String = "",
 )
 
 private const val TILE = 3                 // 3x3 contact sheet
@@ -129,8 +135,23 @@ Rules:
 - Timestamps are in seconds from the start of the video. Frames are sparse, so infer the action
   between frames and use the audio spikes to place start/end precisely.
 - Skip menus, loading screens, pause screens, idle walking/driving, and anything repetitive.
+- NO CUTSCENES. Clips must be 100% player-controlled gameplay. Cutscenes / cinematics usually show
+  black letterbox bars, no HUD (no minimap, health, ammo, speedometer, button prompts), subtitles with
+  dialogue, scripted camera angles, or a "skip" prompt. Start the clip after a cutscene ends and end it
+  before the next one starts. If a moment can't be separated from a cutscene, set cutscene=true
+  (it will be dropped). Replays and photo modes count as cutscenes too.
 - Score honestly (1-10). Most footage is not clip-worthy; returning zero clips for a dull section is correct.
-- title: short hook, max 60 characters. caption: 1-2 punchy sentences for the post. hashtags: 3-6, no '#'.
+- game: the game's name if you can tell from the HUD, title cards or visuals, else "".
+- The text is posted as an Instagram Reel caption, written for maximum reach:
+  - title: the first caption line, the hook people see before "more". Max 60 characters, creates
+    curiosity or tension ("He did NOT see that coming"), may use one emoji, no hashtags, no clickbait lies.
+  - caption: 1-2 short sentences that name the game and describe the moment with words people search for
+    (Instagram captions are searchable, so plain keywords beat slang), then end with ONE call to action
+    that invites comments, e.g. a question ("Would you have made that jump?") or "Tag a friend who...".
+    Max ~250 characters, at most 2 emojis, no hashtags.
+  - hashtags: 3-5 (Instagram allows at most 5), no '#', no spaces, all relevant to this clip:
+    1-2 for the game itself (e.g. gt7, granturismo7), 1-2 niche ones for the moment (e.g. simracing,
+    gamingfails, clutchplay), 1 broad one (e.g. ps5, gaming). No generic spam like fyp, viral, explore.
 - reason: one sentence on what happens in the clip.
 """.trimIndent()
 
@@ -183,7 +204,7 @@ class Clipper(private val cfg: ClipConfig) {
             val out = picked.mapIndexedNotNull { n, c ->
                 val name = "%02d_%s_%s.mp4".format(n + 1, c.category, slug(c.title))
                 if (render(video, File(outDir, name), c)) {
-                    ClipOut(name, c.startSec, c.endSec, c.category, c.score, c.title, c.caption, c.hashtags, c.reason)
+                    ClipOut(name, c.startSec, c.endSec, c.category, c.score, c.title, c.caption, cleanHashtags(c.hashtags), c.reason, c.game)
                 } else null
             }
             File(outDir, "clips.json").writeText(prettyJson.encodeToString(out))
@@ -287,6 +308,7 @@ class Clipper(private val cfg: ClipConfig) {
         val good = mutableListOf<ClipIdea>()
         for (raw in ideas.sortedByDescending { it.score }) {
             if (raw.score < 5) break
+            if (raw.cutscene) continue
             val start = raw.startSec.coerceIn(0, max(0, duration.toLong() - MIN_LEN))
             val end = raw.endSec.coerceIn(start + MIN_LEN, min(start + MAX_LEN, duration.toLong()))
             val c = raw.copy(startSec = start, endSec = end)
@@ -429,6 +451,15 @@ fun writeManualNote(video: File, reason: String, fix: String, folder: File = cli
 
 private fun fmt(sec: Long) = if (sec >= 3600) "%d:%02d:%02d".format(sec / 3600, sec % 3600 / 60, sec % 60)
 else "%d:%02d".format(sec / 60, sec % 60)
+
+/** Instagram allows at most 5 hashtags per post: strip '#'/spaces/punctuation, drop duplicates, keep 5. */
+fun cleanHashtags(tags: List<String>): List<String> = tags
+    .map { it.replace(Regex("""[^\p{L}\p{N}_]"""), "") }
+    .filter { it.isNotEmpty() }
+    .distinctBy { it.lowercase() }
+    .take(MAX_HASHTAGS)
+
+const val MAX_HASHTAGS = 5
 
 private fun slug(s: String) = s.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-').take(40).ifEmpty { "clip" }
 
