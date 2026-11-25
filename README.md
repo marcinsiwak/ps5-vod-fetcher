@@ -126,7 +126,7 @@ Running it again on the same video never overwrites anything. Each run saves to 
 ./local.ps1 -List                # just show the list
 ./local.ps1 -Vod 2 -DownloadOnly # just download it to vods\ (test the YouTube side)
 ```
-The same commands work in the app itself: `list`, `download <n>` and `clip-vod <n> [--max N]`.
+The same commands work in the app itself: `list`, `download <n>` and `clip-vod <n> [--max N]`. Instead of a number from `list` you can give a video id or any YouTube link (also older or unlisted streams), and `--force` downloads the VOD again even if it is already there, e.g. `docker exec vod-fetcher /app/bin/ps5-vod-fetcher clip-vod https://youtu.be/VIDEO_ID --force`. The VOD is added to `processed.txt`, so the service won't download it again, and its clips join the posting queue.
 
 **Run it by hand** on the Pi or in Docker:
 ```bash
@@ -168,6 +168,7 @@ New clips go into a **posting queue**, and **one Reel is published at each posti
 - **Caption:** one short English reaction line that relates to the clip without describing it, then 3-5 hashtags (Instagram allows at most 5) with the game's name. `title` is only used for file names and `captions.md`.
 - **Post right away:** `docker exec vod-fetcher /app/bin/ps5-vod-fetcher post /data/clips/<vod>` posts that folder's next clip (best first); add `--all` for all of them, 5 minutes apart. Manual posts don't use up a scheduled posting time. On the PC, `./post.ps1 "clips\<vod>"` posts all (asks first; `-Yes` skips the question).
 - **Review first instead:** set `AUTO_POST=false` in `vod.env`. Then a folder joins the queue only once it has an `APPROVED` file (`touch /mnt/ssd/clips/<vod>/APPROVED`). Its place is still by stream date, and expiry still counts from the stream date.
+- **Clear the queue:** `docker exec vod-fetcher /app/bin/ps5-vod-fetcher queue clear` drops every clip waiting now, so only VODs clipped from now on get posted. Cleared folders get `POSTED.txt`; delete it to put a folder back, or post single clips with `post <folder>`.
 - **Turn scheduled posting off:** `POST_TIMES=off` (post by hand only).
 
 When a folder is done, it gets `POSTED.txt` with what happened to each clip (posted link, deleted, expired, or failed). `posted.json` in each folder records the Reel links and attempts, so a clip is never posted twice. Uploads go straight from disk, so no public URL or port forwarding is needed.
@@ -186,6 +187,69 @@ While the app is in development mode, it can only post to accounts added to the 
 1. In your app, open **Facebook Login for Business → Configurations** and create one with the variation **"Instagram API (Unified Login)"**. Set the access token to **System-user access token**, add your **Instagram account** as a business asset, and include the permissions `instagram_basic` and `instagram_content_publish`.
 2. Generate the token for that configuration and paste it into `IG_ACCESS_TOKEN=`.
 3. Run `./post.ps1 -Check`. The app finds the account through `me/assigned_instagram_accounts`; a user token whose Instagram is linked to a Page also works. System-user tokens don't expire, so `FB_APP_ID` and `FB_APP_SECRET` aren't needed.
+
+## 9. Commands & settings
+Run a command inside the running container (`vod-fetcher` with `deploy/docker-compose.yml`; use your own container name otherwise):
+```bash
+docker exec -it vod-fetcher /app/bin/ps5-vod-fetcher <command>
+```
+
+**Streams and VODs**
+
+| Command | What it does |
+|---|---|
+| `list` | Numbered list of your finished YouTube streams, newest first. Already downloaded ones are marked `[downloaded]`. |
+| `download <n\|id\|link>` | Downloads one VOD: a number from `list`, a video ID, or any YouTube link. Skips it if it's already downloaded. |
+| `download <n\|id\|link> --force` | Deletes the existing copy and downloads it again. |
+
+**Clipping**
+
+| Command | What it does |
+|---|---|
+| `clip-vod <n\|id\|link>` | Downloads the VOD if needed, then clips it. The clips go into the posting queue. |
+| `clip-vod <n\|id\|link> --max N` | Same, but makes at most N clips (default `MAX_CLIPS`, 8). |
+| `clip-vod <n\|id\|link> --force` | Downloads the VOD again first, even if it's already there. |
+| `clip <file.mp4> [more.mp4…]` | Clips video files already on disk, e.g. `/data/vods/<name>.mp4`. `--max N` works here too. If a VOD was clipped before, the new clips go to `name_2`, `name_3` and so on, so earlier clips are kept. |
+
+**Posting queue**
+
+| Command | What it does |
+|---|---|
+| `queue` | Shows what will be posted when: posting time, score, clip, the caption line, and when each clip under 7/10 expires. |
+| `queue clear` | Drops everything waiting, so only VODs clipped from now on get posted. Each cleared folder gets `POSTED.txt`; delete that file to put the folder back. |
+
+**Instagram**
+
+| Command | What it does |
+|---|---|
+| `ig-check` | Checks the Instagram token and prints the account (`@name`). |
+| `post <clips folder>` | Posts that folder's next clip right away, best score first. It doesn't use up a scheduled slot. |
+| `post <clips folder> --all` | Posts all remaining clips in the folder, 5 minutes apart. |
+
+**Without a command**, the app runs as the service, which is what the container does on its own. It checks YouTube daily at `RUN_AT` (or every `POLL_SECONDS` if `RUN_AT=off`), then downloads, clips and deletes old VODs. It also posts one Reel at each time in `POST_TIMES`.
+
+**Long runs:** clipping takes a while, so you can run it in the background and follow the log:
+```bash
+docker exec -d vod-fetcher sh -c '/app/bin/ps5-vod-fetcher clip-vod 1 > /data/clip.log 2>&1'
+docker exec vod-fetcher tail -f /data/clip.log
+```
+
+**Settings in `vod.env`**
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `POST_TIMES` | `13:00,19:00` | One Reel at each time; `off` means you post by hand only. |
+| `POST_MAX_AGE_DAYS` | `7` | Clips under 7/10 expire this many days after the stream; `0` means never. |
+| `AUTO_POST` | `true` | `false` means only folders with an `APPROVED` file join the queue. |
+| `MAX_CLIPS` | `8` | Number of clips per VOD. |
+| `CLIP_STYLE` | `auto` | `auto` lets Claude pick vertical or horizontal per clip; `crop` or `blur` forces one style. |
+| `CLIP_MODEL` | `haiku` | Claude model for clipping: `haiku`, `sonnet` or `opus`. |
+| `CLIP_FRAME_INTERVAL` | `4` | Seconds between sampled frames; lower catches more (e.g. short cutscenes) but uses more of your Claude plan. |
+| `CLIP_ENABLED` | `true` | `false` turns AI clipping off. |
+| `VOD_RETENTION_DAYS` | `7` | Days to keep downloaded VODs; `0` keeps them. |
+| `RUN_AT` / `RUN_TZ` | `04:00` / `Europe/Warsaw` | Daily fetch time and time zone (`RUN_AT=off` switches to polling). |
+| `POLL_SECONDS` | `300` | How often to check YouTube when `RUN_AT=off`. |
+| `LOOKBACK_HOURS` | `48` daily / `24` polling | The service only downloads streams that ended within this window. |
 
 ## Notes
 - **Quota:** each check costs about 1 unit out of the default 10,000/day (daily mode: 1/day; polling every 5 minutes: about 288/day).

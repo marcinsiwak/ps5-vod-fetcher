@@ -172,6 +172,39 @@ fun clipConfigWithMax(rest: MutableList<String>): ClipConfig {
 }
 
 /** A VOD already downloaded to DOWNLOAD_DIR (file names end in _<video id>.mp4). */
+/** The YouTube video id in [s]: a bare id, or a watch / youtu.be / live / shorts link. Null if [s] isn't one. */
+fun videoId(s: String): String? {
+    val id = "[A-Za-z0-9_-]{11}"
+    Regex("^$id$").find(s)?.let { return it.value }
+    return Regex("(?:[?&]v=|youtu\\.be/|/live/|/shorts/|/embed/)($id)").find(s)?.groupValues?.get(1)
+}
+
+/**
+ * Resolves [which] (number from `list`, video id or YouTube link) and returns the downloaded VOD,
+ * downloading it if needed. [force] deletes an existing copy and downloads it again.
+ * The id goes into processed.txt, so the service won't download it a second time.
+ */
+fun fetchVod(cfg: Config, which: String, force: Boolean): File {
+    val b = which.toIntOrNull()?.let { n ->
+        val vods = YouTube(cfg).completedBroadcasts()
+        vods.getOrNull(n - 1)?.also { log("VOD $n: '${it.snippet.title}' (${it.id})") }
+            ?: error("No VOD number $n (there are ${vods.size}; see `list`)")
+    } ?: videoId(which)?.let { Broadcast(it, Snippet(title = it)).also { b -> log("VOD ${b.id}") } }
+        ?: error("'$which' is not a number from `list`, a video id or a YouTube link")
+
+    downloadedVod(cfg, b)?.let { existing ->
+        if (!force) return existing.also { log("Already downloaded: ${it.name} (add --force to download it again)") }
+        log("--force: deleting ${existing.name} and downloading again")
+        check(existing.delete()) { "Could not delete ${existing.absolutePath}" }
+    }
+    log("Downloading…")
+    val file = download(cfg, b)
+        ?: error("Download failed for ${b.id} (if the stream just ended, YouTube may still be processing it)")
+    val processed = cfg.stateFile.takeIf { it.exists() }?.readLines()?.map { it.trim() }.orEmpty()
+    if (b.id !in processed) cfg.stateFile.apply { absoluteFile.parentFile?.mkdirs() }.appendText("${b.id}\n")
+    return file
+}
+
 fun downloadedVod(cfg: Config, b: Broadcast): File? =
     cfg.downloadDir.listFiles { f -> f.extension == "mp4" && f.nameWithoutExtension.endsWith("_${b.id}") }?.firstOrNull()
 
@@ -196,31 +229,27 @@ fun command(args: Array<String>) {
         }
         return
     }
-    // Only download VOD number N from `list`: ps5-vod-fetcher download N
+    // Download one VOD: ps5-vod-fetcher download <number from list | video id | YouTube link> [--force]
     if (args.firstOrNull() == "download") {
-        val n = args.getOrNull(1)?.toIntOrNull() ?: error("Usage: download <number from list>")
+        val rest = args.drop(1).toMutableList()
+        val force = rest.remove("--force")
+        val which = rest.singleOrNull() ?: error("Usage: download <number from list | video id | YouTube link> [--force]")
         val cfg = Config()
-        val vods = YouTube(cfg).completedBroadcasts()
-        val b = vods.getOrNull(n - 1) ?: error("No VOD number $n (there are ${vods.size}; see `list`)")
-        log("VOD $n: '${b.snippet.title}' (${b.id})")
-        downloadedVod(cfg, b)?.let { log("Already downloaded: ${it.absolutePath}"); return }
-        val file = download(cfg, b)
-            ?: error("Download failed for ${b.id} (if the stream just ended, YouTube may still be processing it)")
-        log("Saved ${file.absolutePath} (${file.length() / 1_048_576} MB)")
+        val file = fetchVod(cfg, which, force)
+        log("VOD file: ${file.absolutePath} (${file.length() / 1_048_576} MB)")
         return
     }
-    // Download (if needed) and clip VOD number N from `list`: ps5-vod-fetcher clip-vod N [--max M]
+    // Download (if needed) and clip one VOD:
+    // ps5-vod-fetcher clip-vod <number from list | video id | YouTube link> [--max N] [--force]
+    // --force downloads it again even if it's already there.
     if (args.firstOrNull() == "clip-vod") {
         val rest = args.drop(1).toMutableList()
+        val force = rest.remove("--force")
         val clipCfg = clipConfigWithMax(rest)
-        val n = rest.singleOrNull()?.toIntOrNull() ?: error("Usage: clip-vod <number from list> [--max N]")
+        val which = rest.singleOrNull()
+            ?: error("Usage: clip-vod <number from list | video id | YouTube link> [--max N] [--force]")
         val cfg = Config()
-        val vods = YouTube(cfg).completedBroadcasts()
-        val b = vods.getOrNull(n - 1) ?: error("No VOD number $n (there are ${vods.size}; see `list`)")
-        log("VOD $n: '${b.snippet.title}' (${b.id})")
-        val file = downloadedVod(cfg, b)?.also { log("Already downloaded: ${it.name}") }
-            ?: run { log("Downloading…"); download(cfg, b) }
-            ?: error("Download failed for ${b.id} (if the stream just ended, YouTube may still be processing it)")
+        val file = fetchVod(cfg, which, force)
         val out = Clipper(clipCfg).process(file, newRun = true)
         log(if (out != null) "Done → ${out.absolutePath}" else "No clips made, see the note above")
         return
@@ -238,7 +267,14 @@ fun command(args: Array<String>) {
         return
     }
     // What gets posted when: ps5-vod-fetcher queue
-    if (args.firstOrNull() == "queue") return printQueue(PostConfig.fromEnv())
+    // Drop everything waiting, post only new VODs from now on: ps5-vod-fetcher queue clear
+    if (args.firstOrNull() == "queue") {
+        return when (args.getOrNull(1)) {
+            null -> printQueue(PostConfig.fromEnv())
+            "clear" -> clearQueue(PostConfig.fromEnv())
+            else -> error("Usage: queue | queue clear")
+        }
+    }
     // Check the Instagram token: ps5-vod-fetcher ig-check
     if (args.firstOrNull() == "ig-check") {
         val ig = Instagram.fromEnv() ?: error("Set IG_ACCESS_TOKEN first")
@@ -246,7 +282,7 @@ fun command(args: Array<String>) {
         log("Instagram token OK: @$username (account id $id)")
         return
     }
-    error("Unknown command '${args.first()}'. Use: list | download <n> | clip-vod <n> [--max N] | clip [--max N] <video...> | post <clips folder...> [--all] | queue | ig-check")
+    error("Unknown command '${args.first()}'. Use: list | download <n|id|link> [--force] | clip-vod <n|id|link> [--max N] [--force] | clip [--max N] <video...> | post <clips folder...> [--all] | queue [clear] | ig-check")
 }
 
 // ---------- Service: fetch + clip (daily or polling), post one Reel per posting time ----------

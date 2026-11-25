@@ -86,7 +86,7 @@ fun postQueue(pc: PostConfig, now: ZonedDateTime = ZonedDateTime.now(pc.zone), f
 }
 
 /** Writes POSTED.txt: what happened to each clip. */
-private fun finishFolder(dir: File, pc: PostConfig, now: ZonedDateTime) {
+private fun finishFolder(dir: File, pc: PostConfig, now: ZonedDateTime, cleared: Boolean = false) {
     val posted = readPosted(dir)
     val date = streamDate(dir, pc.zone)
     val lines = readClips(dir).sortedByDescending { it.score }.map { c ->
@@ -96,6 +96,7 @@ private fun finishFolder(dir: File, pc: PostConfig, now: ZonedDateTime) {
             !File(dir, c.file).exists() -> "deleted, not posted"
             gaveUp(dir, c) -> "failed $MAX_ATTEMPTS times: ${rec?.lastError}"
             QueueItem(dir, c, date).expiresAt(pc)?.isAfter(now) == false -> "expired (score ${c.score} < $NEVER_EXPIRE_SCORE, older than ${pc.maxAgeDays} days)"
+            cleared -> "cleared from the queue, not posted"
             else -> "not posted"
         }
         "${c.file} (${c.score}/10): $status"
@@ -103,6 +104,22 @@ private fun finishFolder(dir: File, pc: PostConfig, now: ZonedDateTime) {
     File(dir, "POSTED.txt").writeText("Posting finished ${Instant.now()}\n\n" + lines.joinToString("\n") + "\n")
     File(dir, APPROVED_MARKER).delete()
     log("Instagram: done with ${dir.name}")
+}
+
+/**
+ * `queue clear`: drops everything waiting now, so only VODs clipped from now on get posted.
+ * Each folder gets POSTED.txt (delete it to put the folder back in the queue); `post <folder>` still works.
+ */
+fun clearQueue(pc: PostConfig) {
+    val now = ZonedDateTime.now(pc.zone)
+    val byFolder = postQueue(pc, now).groupBy { it.dir }
+    if (byFolder.isEmpty()) return println("The queue is already empty.")
+    for ((dir, items) in byFolder) {
+        finishFolder(dir, pc, now, cleared = true)
+        println("Cleared ${items.size} clip(s) from ${dir.name}")
+    }
+    println("\nThe queue is empty: only VODs clipped from now on will be posted.")
+    println("To put a folder back: delete its POSTED.txt. To post one clip anyway: post <folder>.")
 }
 
 /** Posts the first clip in the queue (one per posting time). */
