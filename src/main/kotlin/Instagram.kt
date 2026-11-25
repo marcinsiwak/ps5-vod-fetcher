@@ -20,7 +20,7 @@ import java.time.Instant
 //  EAA…  = Instagram API with Facebook Login (graph.facebook.com, Instagram linked to a Facebook Page)
 private const val IG_API = "https://graph.instagram.com/v27.0"
 private const val FB_API = "https://graph.facebook.com/v27.0"
-private const val MAX_ATTEMPTS = 3
+const val MAX_ATTEMPTS = 3
 const val APPROVED_MARKER = "APPROVED"
 
 private val igJson = Json { ignoreUnknownKeys = true; prettyPrint = true }
@@ -160,37 +160,43 @@ class Instagram(private val envToken: String, private val tokenFile: File) {
     }
 
     /**
-     * Post every clip in a clips folder that still exists (deleted = rejected in review) and isn't posted yet.
-     * Progress lives in posted.json, so re-running never double-posts. Returns true when nothing is left to retry.
+     * Posts one clip and records the result in posted.json (a failure counts as an attempt).
+     * Waits until [POST_GAP] has passed since the previous Reel, also across processes (see [PostGap]).
      */
-    fun postFolder(dir: File): Boolean {
-        account() // token problems throw here, before any clip burns an attempt
-        val clips = igJson.decodeFromString<List<ClipOut>>(File(dir, "clips.json").readText())
-        val postedFile = File(dir, "posted.json")
-        val posted = postedFile.takeIf { it.exists() }
-            ?.let { igJson.decodeFromString<Map<String, PostRecord>>(it.readText()) }?.toMutableMap() ?: mutableMapOf()
-
-        var pending = false
-        for (c in clips) {
-            val rec = posted[c.file] ?: PostRecord()
-            val file = File(dir, c.file)
-            if (rec.mediaId != null || rec.attempts >= MAX_ATTEMPTS || !file.exists()) continue
-
-            log("Instagram: posting ${c.file}…")
-            try {
-                val (mediaId, link) = postReel(file, caption(c))
-                posted[c.file] = rec.copy(mediaId = mediaId, permalink = link, postedAt = Instant.now().toString(),
-                    attempts = rec.attempts + 1, lastError = null)
-                log("Instagram: posted ${c.file} → ${link ?: mediaId}")
-            } catch (e: Exception) {
-                val r = rec.copy(attempts = rec.attempts + 1, lastError = e.message)
-                posted[c.file] = r
-                log("Instagram: failed ${c.file} (attempt ${r.attempts}/$MAX_ATTEMPTS): ${e.message}")
-                if (r.attempts < MAX_ATTEMPTS) pending = true
-            }
-            postedFile.writeText(igJson.encodeToString(posted.toMap()))
+    fun postClip(dir: File, c: ClipOut): Boolean {
+        PostGap.waitTurn()
+        val posted = readPosted(dir).toMutableMap()
+        val rec = posted[c.file] ?: PostRecord()
+        log("Instagram: posting ${dir.name}/${c.file} (score ${c.score}/10)…")
+        try {
+            val (mediaId, link) = postReel(File(dir, c.file), caption(c))
+            posted[c.file] = rec.copy(mediaId = mediaId, permalink = link, postedAt = Instant.now().toString(),
+                attempts = rec.attempts + 1, lastError = null)
+            log("Instagram: posted ${c.file} → ${link ?: mediaId}")
+            return true
+        } catch (e: Exception) {
+            val r = rec.copy(attempts = rec.attempts + 1, lastError = e.message)
+            posted[c.file] = r
+            log("Instagram: failed ${c.file} (attempt ${r.attempts}/$MAX_ATTEMPTS): ${e.message}" +
+                if (r.attempts >= MAX_ATTEMPTS) " — giving up on this clip" else " — retrying at the next posting time")
+            return false
+        } finally {
+            PostGap.markPosted()
+            writePosted(dir, posted)
         }
-        return !pending
+    }
+
+    /**
+     * Manual posting: the folder's next unposted clip (best score first), or all of them with [all]
+     * (5 minutes apart). Ignores expiry and the attempt limit, since you asked for it explicitly.
+     */
+    fun postFolder(dir: File, all: Boolean) {
+        account() // token problems throw here, before any clip burns an attempt
+        val todo = unposted(dir)
+        if (todo.isEmpty()) return log("Instagram: nothing left to post in ${dir.name}")
+        (if (all) todo else todo.take(1)).forEach { postClip(dir, it) }
+        val left = unposted(dir).size
+        log("Instagram: ${dir.name}: $left clip(s) left" + if (left > 0 && !all) " (run again for the next one, or add --all)" else "")
     }
 
     // ---------- http helpers ----------
@@ -218,34 +224,25 @@ class Instagram(private val envToken: String, private val tokenFile: File) {
     private fun enc(s: String) = URLEncoder.encode(s, Charsets.UTF_8)
 }
 
-/**
- * Reel caption: hook line, keyword-rich text with a call to action, then max 5 hashtags at the end
- * (Instagram's limit). Edit title / caption / hashtags in clips.json before approving.
- */
-fun caption(c: ClipOut) = listOf(c.title, c.caption, cleanHashtags(c.hashtags).joinToString(" ") { "#$it" })
+/** Reel caption: one short reaction line, then max 5 hashtags (Instagram's limit). Edit them in clips.json. */
+fun caption(c: ClipOut) = listOf(c.caption, cleanHashtags(c.hashtags).joinToString(" ") { "#$it" })
     .map { it.trim() }.filter { it.isNotEmpty() }.joinToString("\n\n").take(2200)
 
-/**
- * Post clip folders that aren't finished yet (no POSTED.txt):
- *  - every folder whose clips.json was written after [autoSince] (auto-posting; null = off), and
- *  - any folder with an APPROVED file (manual approval, e.g. for older folders).
- * Delete a clip's .mp4 before the run to keep it from being posted. Finished folders get POSTED.txt.
- */
-fun postPending(ig: Instagram, autoSince: Instant?) {
-    val dirs = clipsDir().listFiles { f ->
-        val clips = File(f, "clips.json")
-        f.isDirectory && clips.exists() && !File(f, "POSTED.txt").exists() &&
-            (File(f, APPROVED_MARKER).exists() || (autoSince != null && clips.lastModified() > autoSince.toEpochMilli()))
-    } ?: return
-    for (dir in dirs.sortedBy { it.name }) {
-        try {
-            if (ig.postFolder(dir)) {
-                File(dir, APPROVED_MARKER).delete()
-                File(dir, "POSTED.txt").writeText("Posting finished ${Instant.now()} — see posted.json for links/errors.\n")
-                log("Instagram: done with ${dir.name}")
-            }
-        } catch (e: Exception) {
-            log("Instagram: error in ${dir.name}, will retry next run: ${e.message}")
-        }
-    }
+// ---------- clips folder state ----------
+fun readClips(dir: File): List<ClipOut> = igJson.decodeFromString(File(dir, "clips.json").readText())
+
+fun readPosted(dir: File): Map<String, PostRecord> = File(dir, "posted.json").takeIf { it.exists() }
+    ?.let { igJson.decodeFromString<Map<String, PostRecord>>(it.readText()) } ?: emptyMap()
+
+fun writePosted(dir: File, posted: Map<String, PostRecord>) =
+    File(dir, "posted.json").writeText(igJson.encodeToString(posted))
+
+/** Clips not posted yet whose .mp4 still exists (deleted = rejected), best score first. */
+fun unposted(dir: File): List<ClipOut> {
+    val posted = readPosted(dir)
+    return readClips(dir).filter { File(dir, it.file).exists() && posted[it.file]?.mediaId == null }
+        .sortedWith(compareByDescending<ClipOut> { it.score }.thenBy { it.startSec })
 }
+
+fun attempts(dir: File, c: ClipOut) = readPosted(dir)[c.file]?.attempts ?: 0
+fun gaveUp(dir: File, c: ClipOut) = attempts(dir, c) >= MAX_ATTEMPTS

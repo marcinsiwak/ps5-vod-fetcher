@@ -48,7 +48,8 @@ data class ClipConfig(
     val model: String = System.getenv("CLIP_MODEL") ?: "haiku",
     val maxClips: Int = System.getenv("MAX_CLIPS")?.toInt() ?: 8,
     // "blur" = whole 16:9 frame centred on a blurred fill (keeps HUD/context), "crop" = centre crop to 9:16
-    val style: String = System.getenv("CLIP_STYLE") ?: "blur",
+    // "auto" (default) = Claude picks per clip: "crop" for vertical, "blur" for keeping the horizontal frame
+    val style: String = System.getenv("CLIP_STYLE")?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: "auto",
     // seconds between sampled frames; lower = finer detection, more usage
     val frameInterval: Int = System.getenv("CLIP_FRAME_INTERVAL")?.toInt() ?: 4,
     // the Claude Code CLI binary
@@ -85,6 +86,8 @@ data class ClipConfig(
     val game: String = "",
     /** true if any part of the clip is a cutscene / cinematic; such clips are dropped */
     val cutscene: Boolean = false,
+    /** vertical = centre crop to full-screen 9:16, horizontal = whole 16:9 frame on a blurred background */
+    val framing: String = "horizontal",
 )
 @Serializable data class ClipIdeas(val clips: List<ClipIdea>)
 
@@ -92,14 +95,15 @@ data class ClipConfig(
 private val CLIP_SCHEMA = """
 {"type":"object","additionalProperties":false,"required":["clips"],"properties":{"clips":{"type":"array","items":{
 "type":"object","additionalProperties":false,
-"required":["startSec","endSec","category","score","title","caption","hashtags","reason","game","cutscene"],
+"required":["startSec","endSec","category","score","title","caption","hashtags","reason","game","cutscene","framing"],
 "properties":{
 "startSec":{"type":"integer"},"endSec":{"type":"integer"},
 "category":{"type":"string","enum":["gameplay","stunt","funny","unexpected"]},
 "score":{"type":"integer","minimum":1,"maximum":10},
 "title":{"type":"string"},"caption":{"type":"string"},
 "hashtags":{"type":"array","maxItems":5,"items":{"type":"string"}},"reason":{"type":"string"},
-"game":{"type":"string"},"cutscene":{"type":"boolean"}}}}}}
+"game":{"type":"string"},"cutscene":{"type":"boolean"},
+"framing":{"type":"string","enum":["vertical","horizontal"]}}}}}}
 """.trimIndent().replace("\n", "")
 
 // What we write next to the rendered clips
@@ -107,6 +111,8 @@ private val CLIP_SCHEMA = """
     val file: String, val startSec: Long, val endSec: Long, val category: String,
     val score: Long, val title: String, val caption: String, val hashtags: List<String>, val reason: String,
     val game: String = "",
+    /** vertical (centre crop) or horizontal (whole frame on blurred background), as rendered */
+    val framing: String = "",
 )
 
 private const val TILE = 3                 // 3x3 contact sheet
@@ -142,17 +148,26 @@ Rules:
   (it will be dropped). Replays and photo modes count as cutscenes too.
 - Score honestly (1-10). Most footage is not clip-worthy; returning zero clips for a dull section is correct.
 - game: the game's name if you can tell from the HUD, title cards or visuals, else "".
-- The text is posted as an Instagram Reel caption, written for maximum reach:
-  - title: the first caption line, the hook people see before "more". Max 60 characters, creates
-    curiosity or tension ("He did NOT see that coming"), may use one emoji, no hashtags, no clickbait lies.
-  - caption: 1-2 short sentences that name the game and describe the moment with words people search for
-    (Instagram captions are searchable, so plain keywords beat slang), then end with ONE call to action
-    that invites comments, e.g. a question ("Would you have made that jump?") or "Tag a friend who...".
-    Max ~250 characters, at most 2 emojis, no hashtags.
+- Everything is in English. The caption + hashtags are posted as the Instagram Reel caption:
+  - title: plain label of the moment, for file names and review notes only (not posted). Max 60 characters,
+    e.g. "Muscle car launches off the cliff".
+  - caption: ONE line, max 80 characters: a reaction to the moment, like a viewer's comment: a joke, deadpan
+    remark or understatement that relates to the clip WITHOUT describing or retelling what happens.
+    Good: "Insurance is gonna love this one 🚗💨", "Zero hesitation.", "Physics took the day off".
+    Bad: "Red car jumps off a cliff in GTA V" (describes it), "Would you have braked?" (question),
+    "Follow for more!" (call to action). Don't name the game, at most one emoji, no hashtags.
   - hashtags: 3-5 (Instagram allows at most 5), no '#', no spaces, all relevant to this clip:
     1-2 for the game itself (e.g. gt7, granturismo7), 1-2 niche ones for the moment (e.g. simracing,
     gamingfails, clutchplay), 1 broad one (e.g. ps5, gaming). No generic spam like fyp, viral, explore.
 - reason: one sentence on what happens in the clip.
+- framing: how the 16:9 gameplay should fill the vertical 9:16 Reel.
+  - vertical: crop the centre third to a full-screen vertical video. Choose it when the action stays in the
+    middle of the screen for the whole clip (third-person character or car centred, close-up fights) and
+    nothing that matters happens at the sides.
+  - horizontal: keep the whole 16:9 frame, shown on a blurred background. Choose it when the action moves
+    across the screen, things come in from the sides, it's a wide shot (big jumps, crashes seen from afar),
+    or the HUD at the edges (minimap, timer, score, position) matters for the moment.
+  When unsure, choose horizontal: nothing important gets cut off.
 """.trimIndent()
 
 class Clipper(private val cfg: ClipConfig) {
@@ -204,13 +219,14 @@ class Clipper(private val cfg: ClipConfig) {
             val out = picked.mapIndexedNotNull { n, c ->
                 val name = "%02d_%s_%s.mp4".format(n + 1, c.category, slug(c.title))
                 if (render(video, File(outDir, name), c)) {
-                    ClipOut(name, c.startSec, c.endSec, c.category, c.score, c.title, c.caption, cleanHashtags(c.hashtags), c.reason, c.game)
+                    ClipOut(name, c.startSec, c.endSec, c.category, c.score, c.title, c.caption, cleanHashtags(c.hashtags), c.reason, c.game,
+                        framing = if (renderStyle(c) == "crop") "vertical" else "horizontal")
                 } else null
             }
             File(outDir, "clips.json").writeText(prettyJson.encodeToString(out))
             ClippedLog.add(video)
             File(outDir, "captions.md").writeText(out.joinToString("\n\n") {
-                "## ${it.file}\n**${it.title}** (${it.category}, ${it.score}/10, ${fmt(it.startSec)}–${fmt(it.endSec)})\n\n" +
+                "## ${it.file}\n**${it.title}** (${it.category}, ${it.score}/10, ${fmt(it.startSec)}–${fmt(it.endSec)}, ${it.framing})\n\n" +
                     "${it.caption}\n\n${it.hashtags.joinToString(" ") { h -> "#$h" }}"
             } + "\n")
             writeWorthChecking(File(outDir, WORTH_CHECKING), video, extra)
@@ -333,8 +349,14 @@ class Clipper(private val cfg: ClipConfig) {
     }
 
     // ---------- 5. render vertical 1080x1920 ----------
+    /** CLIP_STYLE=crop/blur forces one style; auto follows Claude's framing pick. */
+    private fun renderStyle(c: ClipIdea) = when (cfg.style) {
+        "crop", "blur" -> cfg.style
+        else -> if (c.framing == "vertical") "crop" else "blur"
+    }
+
     private fun render(video: File, out: File, c: ClipIdea): Boolean {
-        val vf = when (cfg.style) {
+        val vf = when (renderStyle(c)) {
             "crop" -> "scale=-2:1920,crop=1080:1920,setsar=1"
             else -> "split[a][b];" +
                 "[a]scale=270:480:force_original_aspect_ratio=increase,crop=270:480,boxblur=8:2,scale=1080:1920[bg];" +

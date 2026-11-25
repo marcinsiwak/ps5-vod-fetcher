@@ -95,7 +95,7 @@ How it works (`src/main/kotlin/Clipper.kt`):
 1. **Audio scan:** ffmpeg measures loudness every second, and spikes (explosions, crashes, shouting) are passed to Claude as hints.
 2. **Contact sheets:** one keyframe every `CLIP_FRAME_INTERVAL` seconds (default 4), tiled 3×3, so each image covers 36 s of footage. Only keyframes are decoded, so this is fast on a Pi.
 3. **Claude**, run as `claude -p` (`CLIP_MODEL=haiku` by default, or `sonnet`/`opus` for sharper picks), reads about 12 minutes of sheets per run with its Read tool and returns clip candidates as structured JSON: start/end, category, score from 1 to 10, game, title, caption and hashtags. Cutscenes, cinematics, replays and photo mode are never clipped (Claude flags clips that include one and they are dropped).
-4. The best non-overlapping clips scoring 5 or more (up to `MAX_CLIPS`) are rendered with ffmpeg. `CLIP_STYLE=blur` keeps the whole 16:9 frame on a blurred background; `crop` does a center crop.
+4. The best non-overlapping clips scoring 5 or more (up to `MAX_CLIPS`) are rendered with ffmpeg. With `CLIP_STYLE=auto` (default) Claude decides per clip: **vertical** (center crop to full-screen 9:16) when the action stays in the middle, or **horizontal** (the whole 16:9 frame on a blurred background) when it spreads across the screen or the HUD matters. `CLIP_STYLE=crop` or `blur` forces one style for every clip. The choice is saved as `framing` in `clips.json`.
 
 Output goes to `CLIPS_DIR/<vod name>/` (on the Pi: `/mnt/ssd/clips`, which you can change with `CLIPS_DIR=` in `.env`):
 ```
@@ -157,15 +157,20 @@ For YouTube VODs, analysis uses a 360p copy that is deleted afterwards. Clips ar
 Output goes to `clips/<video-id>/`: the clips, plus `highlights.json` listing why each moment was picked.
 
 ## 8. Instagram Reels posting (automatic)
-**Every new clip is published as a Reel automatically** at the daily run, right after clipping. Instagram's API can't save drafts, so there is no draft step. To review before posting, set `AUTO_POST=false` (see below).
+New clips go into a **posting queue**, and **one Reel is published at each posting time**: `POST_TIMES=13:00,19:00` by default (in `RUN_TZ`), so 2 Reels a day. Posting runs on its own schedule in both daily and polling mode. Instagram's API can't save drafts, so there is no draft step.
 
-- **Which folders:** clip folders whose `clips.json` was written within the last `LOOKBACK_HOURS` and that have no `POSTED.txt` yet. Older folders are never posted automatically.
-- **Skipping a clip:** delete its `.mp4` (or edit `title` / `caption` / `hashtags` in `clips.json`) before the next run. The Instagram caption is written for reach: a hook line (title), 1-2 keyword-rich sentences naming the game with a call to action that invites comments (caption), then 3-5 relevant hashtags (Instagram allows at most 5; extras are dropped).
-- **Older folders:** create an empty `APPROVED` file in the folder (`touch /mnt/ssd/clips/<vod>/APPROVED`) and it's posted at the next run.
-- **Post right away:** `docker exec vod-fetcher /app/bin/ps5-vod-fetcher post /data/clips/<vod>`, or on the PC `./post.ps1 "clips\<vod>"` (asks first; `-Yes` skips the question).
-- **Review first instead:** set `AUTO_POST=false` in `vod.env`. Then only folders with an `APPROVED` file get posted.
+- **Order:** oldest VOD first; within a VOD, the highest-scoring clip first. A newer VOD's clips wait until the previous VOD is done.
+- **Expiry:** clips scoring under 7/10 that weren't posted within `POST_MAX_AGE_DAYS` (default 7) of the stream are skipped. Clips scoring 7+ never expire. `POST_MAX_AGE_DAYS=0` turns expiry off.
+- **Failures:** a failed upload uses up that posting time; the clip is retried at the next one, up to 3 times, then skipped.
+- **Spacing:** there are always at least 5 minutes between two Reels, including manual posts.
+- **See the plan:** `docker exec vod-fetcher /app/bin/ps5-vod-fetcher queue` lists every queued clip with its posting time and expiry.
+- **Skipping a clip:** delete its `.mp4`. To change the text, edit `caption` / `hashtags` in `clips.json` before its turn.
+- **Caption:** one short English reaction line that relates to the clip without describing it, then 3-5 hashtags (Instagram allows at most 5) with the game's name. `title` is only used for file names and `captions.md`.
+- **Post right away:** `docker exec vod-fetcher /app/bin/ps5-vod-fetcher post /data/clips/<vod>` posts that folder's next clip (best first); add `--all` for all of them, 5 minutes apart. Manual posts don't use up a scheduled posting time. On the PC, `./post.ps1 "clips\<vod>"` posts all (asks first; `-Yes` skips the question).
+- **Review first instead:** set `AUTO_POST=false` in `vod.env`. Then a folder joins the queue only once it has an `APPROVED` file (`touch /mnt/ssd/clips/<vod>/APPROVED`). Its place is still by stream date, and expiry still counts from the stream date.
+- **Turn scheduled posting off:** `POST_TIMES=off` (post by hand only).
 
-When a folder is done, it gets `POSTED.txt`. `posted.json` in each folder records the Reel links. Already-posted clips are never posted twice. A failed clip is retried up to 3 times (once per run). Uploads go straight from disk, so no public URL or port forwarding is needed.
+When a folder is done, it gets `POSTED.txt` with what happened to each clip (posted link, deleted, expired, or failed). `posted.json` in each folder records the Reel links and attempts, so a clip is never posted twice. Uploads go straight from disk, so no public URL or port forwarding is needed.
 
 **One-time setup** (Instagram professional account; no Facebook Page needed):
 1. In the Instagram app, go to **Settings → Account type and tools** and switch to a **Creator** or **Business** account if you haven't already.

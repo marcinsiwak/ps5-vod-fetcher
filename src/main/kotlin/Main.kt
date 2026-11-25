@@ -32,8 +32,6 @@ data class Config(
     val cookiesFile: String? = System.getenv("YT_COOKIES_FILE"),
     // Optional: command run after a successful download, file path appended as last arg (e.g. upload to S3)
     val postDownloadCmd: String? = System.getenv("POST_DOWNLOAD_CMD"),
-    // Publish every new clip to Instagram automatically (no APPROVED file needed). AUTO_POST=false → approval only.
-    val autoPost: Boolean = System.getenv("AUTO_POST")?.lowercase() != "false",
     // Delete downloaded VODs this many days after download (0 = keep forever). Clips are kept.
     val vodRetentionDays: Long = System.getenv("VOD_RETENTION_DAYS")?.takeIf { it.isNotBlank() }?.toLong() ?: 7,
 )
@@ -227,14 +225,20 @@ fun command(args: Array<String>) {
         log(if (out != null) "Done → ${out.absolutePath}" else "No clips made, see the note above")
         return
     }
-    // Manual mode: ps5-vod-fetcher post <clips folder> [more folders ...]  (posts what's left after your review)
+    // Post now: ps5-vod-fetcher post <clips folder> [more folders ...] [--all]
+    // Posts each folder's next clip (best first), or every remaining clip with --all (5 minutes apart).
     if (args.firstOrNull() == "post") {
+        val all = "--all" in args
+        val dirs = args.drop(1).filter { it != "--all" }
+        if (dirs.isEmpty()) error("Usage: post <clips folder> [more folders ...] [--all]")
         val ig = Instagram.fromEnv() ?: error("Set IG_ACCESS_TOKEN to post to Instagram")
         val (_, username) = ig.account()
         log("Instagram: posting as @$username")
-        args.drop(1).forEach { ig.postFolder(File(it)) }
+        dirs.forEach { ig.postFolder(File(it), all) }
         return
     }
+    // What gets posted when: ps5-vod-fetcher queue
+    if (args.firstOrNull() == "queue") return printQueue(PostConfig.fromEnv())
     // Check the Instagram token: ps5-vod-fetcher ig-check
     if (args.firstOrNull() == "ig-check") {
         val ig = Instagram.fromEnv() ?: error("Set IG_ACCESS_TOKEN first")
@@ -242,63 +246,90 @@ fun command(args: Array<String>) {
         log("Instagram token OK: @$username (account id $id)")
         return
     }
-    error("Unknown command '${args.first()}'. Use: list | download <n> | clip-vod <n> [--max N] | clip [--max N] <video...> | post <clips folder...> | ig-check")
+    error("Unknown command '${args.first()}'. Use: list | download <n> | clip-vod <n> [--max N] | clip [--max N] <video...> | post <clips folder...> [--all] | queue | ig-check")
 }
 
-// ---------- Service: poll YouTube, download, clip, post approved ----------
+// ---------- Service: fetch + clip (daily or polling), post one Reel per posting time ----------
 fun service() {
     val cfg = Config()
     val yt = YouTube(cfg)
     val clipper = ClipConfig.fromEnv()?.let { Clipper(it) }
     val processed = cfg.stateFile.takeIf { it.exists() }?.readLines()?.toMutableSet() ?: mutableSetOf()
-    log(if (cfg.runAt != null) "Started. Running daily at ${cfg.runAt} ${cfg.runZone}, saving to ${cfg.downloadDir.absolutePath}"
+    val pc = PostConfig.fromEnv()
+    log(if (cfg.runAt != null) "Started. Fetching daily at ${cfg.runAt} ${cfg.runZone}, saving to ${cfg.downloadDir.absolutePath}"
         else "Started. Polling every ${cfg.pollSeconds}s, saving to ${cfg.downloadDir.absolutePath}")
     log(if (cfg.vodRetentionDays > 0) "VODs are deleted ${cfg.vodRetentionDays} days after download (VOD_RETENTION_DAYS=0 keeps them)"
         else "VODs are kept forever (VOD_RETENTION_DAYS=0)")
     log(if (clipper != null) "Auto-clipping ON (shorts → ${ClipConfig.fromEnv()!!.outDir.absolutePath})"
         else "Auto-clipping OFF (Claude Code CLI not installed, or CLIP_ENABLED=false)")
     val ig = Instagram.fromEnv()
-    log(if (ig == null) "Instagram posting OFF (set IG_ACCESS_TOKEN to enable)"
-        else if (cfg.autoPost) "Instagram posting ON: every new clip is published automatically (AUTO_POST=false to require $APPROVED_MARKER)"
-        else "Instagram posting ON: folders with an $APPROVED_MARKER file get posted")
+    log(when {
+        ig == null -> "Instagram posting OFF (set IG_ACCESS_TOKEN to enable)"
+        pc.times.isEmpty() -> "Instagram: scheduled posting OFF (POST_TIMES=off), post by hand with `post <folder>`"
+        else -> "Instagram: one Reel at ${pc.times.joinToString(", ")} ${pc.zone}, best clips first, oldest VOD first" +
+            (if (pc.autoPost) "" else " (only folders with an $APPROVED_MARKER file)") + ". See the plan with `queue`."
+    })
+    val posting = ig != null && pc.times.isNotEmpty()
 
+    var nextFetch = if (cfg.runAt != null) nextAt(cfg.runAt, cfg.runZone) else ZonedDateTime.now(cfg.runZone)
+    var lastSlotCheck = ZonedDateTime.now(pc.zone)
     while (true) {
-        cfg.runAt?.let { waitUntil(it, cfg.runZone) }
-        try {
-            val cutoff = Instant.now().minus(Duration.ofHours(cfg.lookbackHours))
-            val fresh = yt.completedBroadcasts().filter { b ->
-                b.id !in processed &&
-                    b.snippet.actualEndTime?.let { Instant.parse(it).isAfter(cutoff) } == true
-            }
-            for (b in fresh) {
-                log("New finished stream: '${b.snippet.title}' (${b.id}) — downloading…")
-                val file = download(cfg, b)
-                if (file != null) {
-                    log("Saved ${file.name}")
-                    runPostCmd(cfg, file)
-                    processed += b.id
-                    cfg.stateFile.appendText("${b.id}\n")
-                } else {
-                    // VOD often needs a few minutes of processing after the stream ends — retry next poll
-                    log("Download not ready/failed for ${b.id}, will retry")
-                }
-            }
-        } catch (e: Exception) {
-            log("Error: ${e.message}")
+        val nextSlot = if (posting) pc.nextSlotAfter(lastSlotCheck) else null
+        val wake = listOfNotNull(nextFetch, nextSlot).minOrNull()!!
+        val wait = Duration.between(ZonedDateTime.now(), wake)
+        if (wait.toMinutes() >= 1) log("Next: " + listOfNotNull(
+            "fetch ${nextFetch.withZoneSameInstant(cfg.runZone).toLocalDateTime()}",
+            nextSlot?.let { "post ${it.toLocalDateTime()}" },
+        ).joinToString(", "))
+        if (!wait.isNegative) Thread.sleep(wait.toMillis())
+
+        if (!ZonedDateTime.now().isBefore(nextFetch)) {
+            fetchAndClip(cfg, yt, clipper, processed)
+            nextFetch = if (cfg.runAt != null) nextAt(cfg.runAt, cfg.runZone)
+                else ZonedDateTime.now(cfg.runZone).plusSeconds(cfg.pollSeconds)
         }
-        clipPending(cfg, clipper)
-        ig?.let { postPending(it, if (cfg.autoPost) Instant.now().minus(Duration.ofHours(cfg.lookbackHours)) else null) }
-        try { deleteOldVods(cfg) } catch (e: Exception) { log("Cleanup error: ${e.message}") }
-        if (cfg.runAt == null) Thread.sleep(cfg.pollSeconds * 1000)
+        if (posting) {
+            // A posting time passed (maybe while clipping ran): post one Reel. Missed times don't pile up.
+            val now = ZonedDateTime.now(pc.zone)
+            val due = pc.nextSlotAfter(lastSlotCheck)?.let { !it.isAfter(now) } == true
+            lastSlotCheck = now
+            if (due) try { postNext(ig!!, pc) } catch (e: Exception) { log("Instagram: error: ${e.message}") }
+        }
     }
 }
 
-/** Sleeps until the next [time] in [zone] (DST-aware). */
-fun waitUntil(time: LocalTime, zone: ZoneId) {
+/** Check YouTube for finished streams, download new ones, clip pending VODs, delete old VODs. */
+fun fetchAndClip(cfg: Config, yt: YouTube, clipper: Clipper?, processed: MutableSet<String>) {
+    if (cfg.runAt != null) log("Daily run starting")
+    try {
+        val cutoff = Instant.now().minus(Duration.ofHours(cfg.lookbackHours))
+        val fresh = yt.completedBroadcasts().filter { b ->
+            b.id !in processed &&
+                b.snippet.actualEndTime?.let { Instant.parse(it).isAfter(cutoff) } == true
+        }
+        for (b in fresh) {
+            log("New finished stream: '${b.snippet.title}' (${b.id}) — downloading…")
+            val file = download(cfg, b)
+            if (file != null) {
+                log("Saved ${file.name}")
+                runPostCmd(cfg, file)
+                processed += b.id
+                cfg.stateFile.appendText("${b.id}\n")
+            } else {
+                // VOD often needs a few minutes of processing after the stream ends — retry next poll
+                log("Download not ready/failed for ${b.id}, will retry")
+            }
+        }
+    } catch (e: Exception) {
+        log("Error: ${e.message}")
+    }
+    clipPending(cfg, clipper)
+    try { deleteOldVods(cfg) } catch (e: Exception) { log("Cleanup error: ${e.message}") }
+}
+
+/** The next [time] in [zone] after now (DST-aware). */
+fun nextAt(time: LocalTime, zone: ZoneId): ZonedDateTime {
     val now = ZonedDateTime.now(zone)
-    var next = now.with(time).withSecond(0).withNano(0)
-    if (!next.isAfter(now)) next = next.plusDays(1).with(time)
-    log("Next run: $next")
-    Thread.sleep(Duration.between(now, next).toMillis())
-    log("Daily run starting")
+    val today = now.with(time).withSecond(0).withNano(0)
+    return if (today.isAfter(now)) today else now.plusDays(1).with(time).withSecond(0).withNano(0)
 }

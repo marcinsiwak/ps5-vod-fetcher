@@ -24,7 +24,7 @@ if (-not $Folder) { throw "Usage: ./post.ps1 <clips folder>   (or -Check)" }
 $dir = Get-Item -LiteralPath $Folder
 $clips = Get-Content -Raw "$dir\clips.json" | ConvertFrom-Json
 $posted = if (Test-Path "$dir\posted.json") { Get-Content -Raw "$dir\posted.json" | ConvertFrom-Json } else { $null }
-$todo = $clips | Where-Object {
+$todo = $clips | Sort-Object -Property score -Descending | Where-Object {
     (Test-Path (Join-Path $dir $_.file)) -and -not ($posted -and $posted.($_.file).mediaId)
 }
 if (-not $todo) { Write-Host "Nothing to post in $($dir.Name) (all posted, or no .mp4 left)."; return }
@@ -32,7 +32,6 @@ if (-not $todo) { Write-Host "Nothing to post in $($dir.Name) (all posted, or no
 Write-Host "`nWill post $(@($todo).Count) Reel(s) from '$($dir.Name)':`n"
 foreach ($c in $todo) {
     Write-Host "  $($c.file)  [$($c.category), $($c.score)/10]" -ForegroundColor Cyan
-    Write-Host "    $($c.title)"
     Write-Host "    $($c.caption)"
     Write-Host "    $(($c.hashtags | ForEach-Object { '#' + $_ }) -join ' ')`n"
 }
@@ -41,4 +40,4 @@ if (-not $Yes) {
     if ($a -notmatch '^(y|yes|t|tak)$') { Write-Host "Cancelled."; return }
 }
 
-docker @run -v "$($dir.FullName):/data/post/$($dir.Name)" $image post "/data/post/$($dir.Name)"
+docker @run -v "$($dir.FullName):/data/post/$($dir.Name)" $image post "/data/post/$($dir.Name)" --all
