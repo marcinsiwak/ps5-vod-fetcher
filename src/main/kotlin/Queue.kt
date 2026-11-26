@@ -132,13 +132,13 @@ fun postNext(ig: Instagram, pc: PostConfig) {
     }
     ig.postClip(next.dir, next.clip)
     postQueue(pc, finish = true) // close the folder right away if that was its last clip
+    logQueue(pc)
 }
 
 /** `queue` command: what will be posted when. Assumes every post succeeds. */
 fun printQueue(pc: PostConfig) {
     val now = ZonedDateTime.now(pc.zone)
     val q = postQueue(pc, now)
-    val fmt = DateTimeFormatter.ofPattern("EEE dd.MM HH:mm", java.util.Locale.ENGLISH)
     println(if (pc.times.isEmpty()) "Scheduled posting is OFF (POST_TIMES=off). Post by hand with: post <folder>"
         else "Posting at ${pc.times.joinToString(", ")} (${pc.zone}), one Reel each. " +
             "Clips under $NEVER_EXPIRE_SCORE/10 expire ${pc.maxAgeDays} days after the stream" +
@@ -146,6 +146,25 @@ fun printQueue(pc: PostConfig) {
     if (!pc.autoPost) println("AUTO_POST=false: only folders with an $APPROVED_MARKER file are queued.")
     if (q.isEmpty()) return println("\nThe queue is empty.")
     println()
+    queueLines(pc, q, now, captions = true).forEach(::println)
+}
+
+/** Logs the queue (service start, after each Reel). Never throws: it's only informational. */
+fun logQueue(pc: PostConfig) {
+    try {
+        val now = ZonedDateTime.now(pc.zone)
+        val q = postQueue(pc, now)
+        if (q.isEmpty()) return log("Queue: empty")
+        log("Queue: ${q.size} clip(s) waiting:\n" + queueLines(pc, q, now, captions = false).joinToString("\n"))
+    } catch (e: Exception) {
+        log("Queue: can't list it: ${e.message}")
+    }
+}
+
+/** One line per clip with its planned posting time (simulated, assuming every post succeeds). */
+private fun queueLines(pc: PostConfig, q: List<QueueItem>, now: ZonedDateTime, captions: Boolean): List<String> {
+    val fmt = DateTimeFormatter.ofPattern("EEE dd.MM HH:mm", java.util.Locale.ENGLISH)
+    val out = mutableListOf<String>()
     var from = now
     for (item in q) {
         val c = item.clip
@@ -153,15 +172,16 @@ fun printQueue(pc: PostConfig) {
         val exp = item.expiresAt(pc)
         val name = "${item.dir.name}/${c.file}"
         when {
-            slot == null -> println("  (manual)        ${c.score}/10  $name")
-            exp != null && !exp.isAfter(slot) -> println("  (expires ${exp.format(fmt)} before its turn)  ${c.score}/10  $name")
+            slot == null -> out += "  (manual)        ${c.score}/10  $name"
+            exp != null && !exp.isAfter(slot) -> out += "  (expires ${exp.format(fmt)} before its turn)  ${c.score}/10  $name"
             else -> {
-                println("  ${slot.format(fmt)}  ${c.score}/10  $name" + (exp?.let { "  [expires ${it.format(fmt)}]" } ?: ""))
-                println("                   ${c.caption.lines().first().take(80)}")
+                out += "  ${slot.format(fmt)}  ${c.score}/10  $name" + (exp?.let { "  [expires ${it.format(fmt)}]" } ?: "")
+                if (captions) out += "                   ${c.caption.lines().first().take(80)}"
                 from = slot
             }
         }
     }
+    return out
 }
 
 /**

@@ -306,6 +306,7 @@ fun service() {
             (if (pc.autoPost) "" else " (only folders with an $APPROVED_MARKER file)") + ". See the plan with `queue`."
     })
     val posting = ig != null && pc.times.isNotEmpty()
+    logQueue(pc)
 
     var nextFetch = if (cfg.runAt != null) nextAt(cfg.runAt, cfg.runZone) else ZonedDateTime.now(cfg.runZone)
     var lastSlotCheck = ZonedDateTime.now(pc.zone)
