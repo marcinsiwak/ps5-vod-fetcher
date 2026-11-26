@@ -8,7 +8,7 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 
 // ---------- Posting queue ----------
-// One Reel per posting time (POST_TIMES, default 13:00 and 19:00). VODs are posted oldest first, and a VOD's
+// One Reel per posting time (POST_TIMES, default 12:00, 17:00 and 21:00). VODs are posted oldest first, and a VOD's
 // clips best score first; a newer VOD waits until the older one is done. Clips scoring below
 // NEVER_EXPIRE_SCORE that weren't posted within POST_MAX_AGE_DAYS of the stream are skipped.
 
@@ -31,13 +31,13 @@ data class PostConfig(
 
     companion object {
         fun fromEnv() = PostConfig(
-            times = parseTimes(System.getenv("POST_TIMES")?.takeIf { it.isNotBlank() } ?: "13:00,19:00"),
+            times = parseTimes(System.getenv("POST_TIMES")?.takeIf { it.isNotBlank() } ?: "12:00,17:00,21:00"),
             zone = ZoneId.of(System.getenv("RUN_TZ")?.takeIf { it.isNotBlank() } ?: "Europe/Warsaw"),
             maxAgeDays = System.getenv("POST_MAX_AGE_DAYS")?.takeIf { it.isNotBlank() }?.toLong() ?: 7,
             autoPost = System.getenv("AUTO_POST")?.lowercase() != "false",
         )
 
-        /** "13:00,19:00" (also "9:30") → sorted times; "off" → none. */
+        /** "12:00,17:00,21:00" (also "9:30") → sorted times; "off" → none. */
         private fun parseTimes(s: String): List<LocalTime> {
             if (s.trim().equals("off", ignoreCase = true)) return emptyList()
             return s.split(",").map { it.trim() }.filter { it.isNotEmpty() }.map {

@@ -157,7 +157,7 @@ For YouTube VODs, analysis uses a 360p copy that is deleted afterwards. Clips ar
 Output goes to `clips/<video-id>/`: the clips, plus `highlights.json` listing why each moment was picked.
 
 ## 8. Instagram Reels posting (automatic)
-New clips go into a **posting queue**, and **one Reel is published at each posting time**: `POST_TIMES=13:00,19:00` by default (in `RUN_TZ`), so 2 Reels a day. Posting runs on its own schedule in both daily and polling mode. Instagram's API can't save drafts, so there is no draft step.
+New clips go into a **posting queue**, and **one Reel is published at each posting time**: `POST_TIMES=12:00,17:00,21:00` by default (in `RUN_TZ`), so 3 Reels a day. Posting runs on its own schedule in both daily and polling mode. Instagram's API can't save drafts, so there is no draft step.
 
 - **Order:** oldest VOD first; within a VOD, the highest-scoring clip first. A newer VOD's clips wait until the previous VOD is done.
 - **Expiry:** clips scoring under 7/10 that weren't posted within `POST_MAX_AGE_DAYS` (default 7) of the stream are skipped. Clips scoring 7+ never expire. `POST_MAX_AGE_DAYS=0` turns expiry off.
@@ -238,7 +238,7 @@ docker exec vod-fetcher tail -f /data/clip.log
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `POST_TIMES` | `13:00,19:00` | One Reel at each time; `off` means you post by hand only. |
+| `POST_TIMES` | `12:00,17:00,21:00` | One Reel at each time; `off` means you post by hand only. |
 | `POST_MAX_AGE_DAYS` | `7` | Clips under 7/10 expire this many days after the stream; `0` means never. |
 | `AUTO_POST` | `true` | `false` means only folders with an `APPROVED` file join the queue. |
 | `MAX_CLIPS` | `8` | Number of clips per VOD. |
